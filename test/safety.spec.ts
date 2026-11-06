@@ -237,3 +237,23 @@ test('같은 이름이라도 다른 서버의 run 은 나중 run 판정에 섞�
   writeFileSync(`${bDir}/upload.done`, '2026-11-06 20:00:02\n')
   assert.ok(!laterOverlaps(a).some((x) => x.run === 'fx-20261106-200001-aaaaaab2'))
 })
+
+test('작업 기록: 프로세스 번호가 다른 프로세스에 다시 쓰여도, beat 가 멈췄으면 끝난 작업으로 본다', async () => {
+  const { readJob, writeJob, JobWriter } = await import('../src/engine/jobs.ts')
+  const old = Date.now() - 10 * 60000
+  // 예전 CLI 가 남긴 기록(beat 없음). pid 는 지금 살아 있는 이 프로세스 — Orca 재시작 뒤 번호가 재사용된 경우.
+  const base = { step: 'plan' as const, target: 'fx', run: null, spec: '#1', message: null, progress: null, lines: [], endedAt: null }
+  writeJob({ ...base, id: 'stuck1', state: 'running', startedAt: old, pid: process.pid })
+  assert.equal(readJob('stuck1')?.state, 'failed')
+  // beat 가 2분 넘게 멈춤
+  writeJob({ ...base, id: 'stuck2', state: 'running', startedAt: old, pid: process.pid, beat: Date.now() - 3 * 60000 })
+  assert.equal(readJob('stuck2')?.state, 'failed')
+  // beat 가 살아 있으면 오래 걸려도 도는 중
+  writeJob({ ...base, id: 'alive1', state: 'running', startedAt: old, pid: process.pid, beat: Date.now() - 5000 })
+  assert.equal(readJob('alive1')?.state, 'running')
+  // JobWriter 는 시작할 때 beat 를 남기고, 끝나면 beat 타이머를 멈춘다(프로세스를 붙잡지 않음)
+  const w = new JobWriter('writer1', { step: 'plan', target: 'fx', run: null, spec: '#1' })
+  assert.ok((readJob('writer1')?.beat ?? 0) > Date.now() - 5000)
+  w.finish(true, null)
+  assert.equal(readJob('writer1')?.state, 'done')
+})

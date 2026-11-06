@@ -76,6 +76,26 @@ test('작업공간 저장소로 대상을 고른다 — 이름·브랜치가 하
   await two.deactivate()
 })
 
+test('준비 확인 응답은 JSON 값만 담는다 — undefined 칸이 있으면 Orca 가 응답을 거절함', async () => {
+  writeFileSync(`${home}/home/targets/fx.json`, JSON.stringify(target))
+  mkdirSync(`${repo}/src/main/webapp`, { recursive: true })
+  writeFileSync(`${repo}/src/main/webapp/a.xml`, '<a/>')
+  const g = (...args: string[]) => spawnSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args])
+  g('add', '-A')
+  g('commit', '-q', '-m', 'one')
+  writeFileSync(`${repo}/src/main/webapp/a.xml`, '<b/>')
+  g('commit', '-qam', 'two')
+  const worker = await mountWorker(main, { host: host([]) })
+  const r = await worker.request('check', { target: 'fx', spec: 'HEAD' })
+  const json = (v: unknown, path: string): void => {
+    assert.notEqual(v, undefined, `undefined: ${path}`)
+    if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) json(x, `${path}.${k}`)
+  }
+  json(r, '$')
+  assert.ok(r.items.some((i: { id: string }) => i.id === 'branch'))
+  await worker.deactivate()
+})
+
 test('작업 시작: 다른 대상의 run 이나 확인 코드 없는 업로드는 거절', async () => {
   const worker = await mountWorker(main, { host: host([]) })
   let refused = ''

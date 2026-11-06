@@ -19,11 +19,16 @@ export type Job = {
   startedAt: number
   endedAt: number | null
   pid: number | null
+  /** CLI 가 살아 있는 동안 BEAT_MS 마다 고치는 시각. 프로세스 번호는 재사용될 수 있어 이것으로도 본다. */
+  beat?: number
   /** 파일만 보고 "프로세스가 끝남"으로 추정한 실패(저장하지 않는 표시). */
   inferred?: boolean
 }
 
 const MAX_LINES = 300
+const BEAT_MS = 10000
+/** beat 가 이만큼 멈추면 프로세스 번호가 살아 있어도 끝난 작업으로 본다. */
+const BEAT_STALE_MS = 120000
 
 export function jobsDir(): string {
   return join(home(), 'jobs')
@@ -90,8 +95,10 @@ export function readJob(id: string): Job | null {
       }
     }
     const j = JSON.parse(text) as Job
-    // 시작한 지 30초가 지났는데 프로세스가 없으면 끝난 것으로 본다(갑자기 죽은 경우).
-    if ((j.state === 'running' || j.state === 'starting') && !alive(j.pid) && Date.now() - j.startedAt > 30000) {
+    // 시작한 지 30초가 지났는데 프로세스가 없거나 beat 가 멈췄으면 끝난 것으로 본다(갑자기 죽은 경우).
+    // 프로세스 번호만 보면, Windows 가 그 번호를 다른 프로세스에 다시 줬을 때 영원히 "도는 중"으로 남는다.
+    const beating = !!j.beat && Date.now() - j.beat < BEAT_STALE_MS
+    if ((j.state === 'running' || j.state === 'starting') && (!alive(j.pid) || !beating) && Date.now() - j.startedAt > 30000) {
       j.state = 'failed'
       j.inferred = true
       j.message = j.message ?? '작업 프로세스가 결과를 남기지 않고 끝남 — 로그를 보세요'
@@ -127,6 +134,7 @@ export function listJobs(): Job[] {
 export class JobWriter {
   job: Job | null
   private last = 0
+  private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(id: string | null, init: Omit<Job, 'id' | 'state' | 'message' | 'progress' | 'lines' | 'startedAt' | 'endedAt' | 'pid'>) {
     if (!id) {
@@ -143,9 +151,13 @@ export class JobWriter {
       lines: prev?.lines ?? [],
       startedAt: prev?.startedAt ?? Date.now(),
       endedAt: null,
-      pid: process.pid
+      pid: process.pid,
+      beat: Date.now()
     }
     writeJob(this.job)
+    // 진행이 한동안 없어도(긴 업로드 등) 살아 있음을 남긴다. 프로세스가 끝나는 것을 막지 않게 unref.
+    this.timer = setInterval(() => this.flush(true), BEAT_MS)
+    this.timer.unref?.()
   }
 
   line(s: string): void {
@@ -169,6 +181,8 @@ export class JobWriter {
   /** 마지막 상태는 화면이 결과를 알 유일한 길이라 더 끈질기게 다시 쓴다(최대 3번 × 이름 바꾸기 20번 시도, 합쳐 약 15초). */
   finish(ok: boolean, message: string | null): void {
     if (!this.job) return
+    if (this.timer) clearInterval(this.timer)
+    this.timer = null
     this.job.state = ok ? 'done' : 'failed'
     this.job.message = message
     this.job.endedAt = Date.now()
@@ -179,6 +193,7 @@ export class JobWriter {
     if (!this.job) return
     const now = Date.now()
     if (!force && now - this.last < 300) return
+    this.job.beat = now
     // 못 쓰면 다음 줄에서 다시 쓴다(last 를 그대로 두어 바로 다시 시도).
     if (writeJob(this.job, force ? 10 : 3)) this.last = now
   }

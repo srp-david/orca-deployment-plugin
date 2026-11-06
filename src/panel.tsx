@@ -7,7 +7,6 @@ import {
   Button,
   Callout,
   Card,
-  Checkbox,
   Code,
   CodeView,
   Collapsible,
@@ -33,6 +32,7 @@ import {
   Table,
   Tabs,
   Text,
+  Textarea,
   update,
   type PanelContext
 } from 'orca'
@@ -154,10 +154,17 @@ function chooseTarget(id: string, force = false): void {
   void loadRuns()
 }
 
+/** 작업 기록을 파일에서 다시 읽는다. 이벤트를 놓쳐 "도는 중"으로 남은 작업도 이것으로 바로잡힌다. */
+async function loadJobs(): Promise<void> {
+  const recent = await ask(() => plugin.request('jobs.recent'))
+  if (recent) set(jobs, Object.fromEntries(recent.map((j) => [j.id, j])))
+}
+
 async function refresh(): Promise<void> {
   act()
   await detectWorkspace()
   await loadTargets()
+  await loadJobs()
   const id = read(runId)
   if (id) await loadRun(id)
 }
@@ -348,8 +355,7 @@ async function firstLoad(signal: AbortSignal): Promise<void> {
   }
   await detectWorkspace()
   await loadTargets()
-  const recent = await ask(() => plugin.request('jobs.recent'))
-  if (recent) set(jobs, Object.fromEntries(recent.map((j) => [j.id, j])))
+  await loadJobs()
 }
 
 export function setup(ctx: PanelContext): void {
@@ -501,7 +507,7 @@ function PreflightCard() {
               <Button icon="refresh" variant="ghost" onPress={runCheck}>
                 다시 확인
               </Button>
-              <Button icon="play" disabled={!p.view.ok || !!activeJob(t.id)} onPress={runPlan}>
+              <Button icon="play" tone="accent" disabled={!p.view.ok || !!activeJob(t.id)} onPress={runPlan}>
                 Plan
               </Button>
             </Box>
@@ -600,21 +606,24 @@ function RunCard() {
             class 포함 — 올린 뒤 톰캣 재기동 필요
           </Callout>
         )}
-        <Table
-          label="반영 목록"
-          maxHeight="md"
-          emptyText="올릴 파일 없음"
-          columns={[
-            { key: 'kind', label: '구분', width: 'xs' },
-            { key: 'local', label: '로컬', minWidth: 'md' },
-            { key: 'remote', label: '운영', minWidth: 'md' },
-            { key: 'note', label: '메모', hideBelow: 'md' }
-          ]}
-          rows={v.rows.map((r, i) => ({
-            key: `r${i}`,
-            cells: { kind: r.kind === 'M' ? '덮어씀' : '새 파일', local: r.local, remote: r.remote, note: r.note }
-          }))}
-        />
+        {v.rows.length === 0 ? (
+          <Text muted size="sm">
+            올릴 파일 없음
+          </Text>
+        ) : (
+          <Box border radius="md" maxHeight={420} scroll="y">
+            <List label="반영 목록">
+              {v.rows.map((r, i) => (
+                <ListItem
+                  key={`r${i}`}
+                  icon={r.kind === 'M' ? 'file' : 'add'}
+                  title={r.local}
+                  description={`${r.kind === 'M' ? '덮어씀' : '새 파일'} → ${r.remote}${r.note ? ' · ' + r.note : ''}`}
+                />
+              ))}
+            </List>
+          </Box>
+        )}
         {v.manual.length > 0 && (
           <Collapsible title={`손 처리 파일 ${v.manual.length}개 (올리지 않음)`} defaultOpen>
             <List label="손 처리 파일">
@@ -771,12 +780,14 @@ function RunsTab() {
         }))}
       />
       {d && (
-        <Card title={d.view.id} description="로그 (deploy.log)">
-          <Stack gap="xs">
+        <Card title="run 로그" description={`${d.view.id} · deploy.log`}>
+          <Stack gap="sm">
             <CodeView code={d.log.join('\n') || '(비어 있음)'} maxHeight="lg" wrap />
-            <Button variant="outline" size="sm" onPress={() => set(tab, 'deploy')}>
-              반영 탭에서 보기
-            </Button>
+            <Box direction="row" justify="end">
+              <Button variant="outline" size="sm" icon="rocket" onPress={() => set(tab, 'deploy')}>
+                반영 탭에서 보기
+              </Button>
+            </Box>
           </Stack>
         </Card>
       )}
@@ -839,8 +850,8 @@ function TargetEditor() {
       )}
       {notice && <Callout tone="success">{notice}</Callout>}
 
-      <Card title="대상">
-        <Stack gap="sm">
+      <Card title="대상" description="저장소와 run 기록 위치">
+        <Stack gap="md">
           <TextField
             label={e.previousId ? '이름 (만든 뒤에는 바꿀 수 없음 — run 기록이 이름에 묶임)' : '이름 (영문 소문자·숫자·_)'}
             value={t.id}
@@ -860,8 +871,8 @@ function TargetEditor() {
         </Stack>
       </Card>
 
-      <Card title="연결 (FTP)">
-        <Stack gap="sm">
+      <Card title="연결 (FTP)" description="운영 서버 주소와 운영 루트">
+        <Stack gap="md">
           <Box direction="row" gap="xs">
             <Box grow>
               <TextField label="호스트" value={c.host} onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, host: v.trim() } }))} />
@@ -875,13 +886,36 @@ function TargetEditor() {
             </Box>
           </Box>
           <TextField label="운영 루트" value={c.root} placeholder="/webapps/ROOT" onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, root: v.trim() } }))} />
-          <Checkbox
+          <Switch
             label="패시브 모드"
             checked={c.passive !== false}
             onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, passive: v } }))}
           />
         </Stack>
       </Card>
+
+      {e.previousId && (
+        <Card title="접속 정보" description={`Windows 자격 증명 관리자 prod-deploy:${e.previousId}`}>
+          <Stack gap="sm">
+            <Text size="xs" muted>
+              {e.credUser
+                ? `저장돼 있음 (사용자 ${e.credUser})`
+                : e.netrc
+                  ? '자격 증명 관리자에 없음 — 지금은 옮기는 동안의 netrc 로 접속'
+                  : '없음 — 저장해야 접속할 수 있음'}
+            </Text>
+            <Box columns={2} gap="xs">
+              <Input label="사용자" value={read(cred).user} onChange={(v) => set(cred, { ...read(cred), user: v })} />
+              <Input label="비밀번호" type="password" value={read(cred).password} onChange={(v) => set(cred, { ...read(cred), password: v })} />
+            </Box>
+            <Box direction="row" justify="end">
+              <Button icon="check" size="sm" disabled={!read(cred).user.trim() || !read(cred).password} onPress={saveCred}>
+                접속 정보 저장
+              </Button>
+            </Box>
+          </Stack>
+        </Card>
+      )}
 
       <Card title="경로 매핑" description="저장소 폴더 → 운영 루트 아래 폴더. 가장 구체적인 매핑을 씁니다.">
         <Stack gap="sm">
@@ -959,7 +993,7 @@ function TargetEditor() {
             }
           />
           {t.java && (
-            <Stack gap="sm">
+            <Stack gap="md">
               <TextField label="소스 폴더" value={t.java.source} onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, source: v.trim() } }))} />
               <TextField label="빌드 결과 폴더" value={t.java.output} onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, output: v.trim() } }))} />
               <TextField
@@ -967,8 +1001,9 @@ function TargetEditor() {
                 value={String(t.java.major)}
                 onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, major: Number(v) || 0 } }))}
               />
-              <TextField
+              <Textarea
                 label="빌드 명령 (안내용, 메인 체크아웃에서 사람이 실행)"
+                rows={3}
                 value={t.java.build ?? ''}
                 onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, build: v || undefined } }))}
               />
@@ -1053,29 +1088,6 @@ function TargetEditor() {
       </Box>
 
       {e.previousId && (
-        <Card title="접속 정보" description={`Windows 자격 증명 관리자 prod-deploy:${e.previousId}`}>
-          <Stack gap="sm">
-            <Text size="xs" muted>
-              {e.credUser
-                ? `저장돼 있음 (사용자 ${e.credUser})`
-                : e.netrc
-                  ? '자격 증명 관리자에 없음 — 지금은 옮기는 동안의 netrc 로 접속'
-                  : '없음 — 저장해야 접속할 수 있음'}
-            </Text>
-            <Box columns={2} gap="xs">
-              <Input label="사용자" value={read(cred).user} onChange={(v) => set(cred, { ...read(cred), user: v })} />
-              <Input label="비밀번호" type="password" value={read(cred).password} onChange={(v) => set(cred, { ...read(cred), password: v })} />
-            </Box>
-            <Box direction="row" justify="end">
-              <Button icon="check" size="sm" disabled={!read(cred).user.trim() || !read(cred).password} onPress={saveCred}>
-                접속 정보 저장
-              </Button>
-            </Box>
-          </Stack>
-        </Card>
-      )}
-
-      {e.previousId && (
         <Card title="설정 확인" description="확인용 커밋으로 plan 을 돌려, 모든 파일이 운영에 이미 반영된 것으로 나오는지 봅니다(운영 읽기만).">
           <Stack gap="sm">
             <Button icon="play" variant="outline" disabled={!t.checkCommit || (!!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting'))} onPress={startConfigCheck}>
@@ -1117,6 +1129,7 @@ export default function Panel() {
           <TargetsTab />
         </Tab>
       </Tabs>
+      <Box height={56} />
     </Stack>
   )
 }

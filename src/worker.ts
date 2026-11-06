@@ -47,9 +47,12 @@ function fail(e: unknown, code = 'action_failed'): never {
   throw err
 }
 
+/** 모든 패널 요청의 응답 출구. Orca 는 JSON 이 아닌 값(undefined 칸 등)이 섞인 응답을 거절하므로
+ *  JSON 으로 한 번 바꿔 보낸다(undefined 칸은 빠진다). */
 async function guard<T>(body: () => Promise<T> | T): Promise<T> {
   try {
-    return await body()
+    const out = await body()
+    return out === undefined ? out : (JSON.parse(JSON.stringify(out)) as T)
   } catch (e) {
     fail(e)
   }
