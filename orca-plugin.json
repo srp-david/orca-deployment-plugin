@@ -1,0 +1,37 @@
+{
+  "manifestVersion": 2,
+  "id": "prod-deploy",
+  "name": "운영 반영",
+  "version": "0.1.0",
+  "description": "바뀐 파일을 대상(업체) 운영 서버에 FTP로 반영한다: 준비 확인 → plan → 백업 → 업로드 → 대조, 되돌리기.",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "deploy",
+        "title": "운영 반영",
+        "icon": "rocket",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "deploy",
+        "text": "운영 반영",
+        "icon": "rocket",
+        "tooltip": "운영 반영 패널의 작업 상태"
+      }
+    ]
+  },
+  "capabilities": [
+    { "kind": "storage:own" },
+    { "kind": "workspace:read" },
+    { "kind": "notifications:show" }
+  ]
+}

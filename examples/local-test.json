@@ -1,0 +1,28 @@
+{
+  "id": "test",
+  "label": "시험 (로컬 FTP)",
+  "test": true,
+  "repo": "~/.prod-deploy/test-repo",
+  "mainBranch": "main",
+  "runs": "~/.prod-deploy/runs/test",
+  "connection": {
+    "protocol": "ftp",
+    "host": "127.0.0.1",
+    "port": 2121,
+    "root": "/app",
+    "passive": true
+  },
+  "mappings": [
+    { "local": "src/main/webapp", "remote": "/" },
+    { "local": "build/classes/java/main", "remote": "/WEB-INF/classes" }
+  ],
+  "java": {
+    "source": "src/main/java",
+    "output": "build/classes/java/main",
+    "major": 52
+  },
+  "manual": [
+    { "pattern": "src/main/webapp/WEB-INF/web.xml", "reason": "운영 서버가 별도 파일을 씀 — 필요한 변경만 손으로" },
+    { "pattern": "src/main/resources/**", "reason": "환경별 설정 — 손으로" }
+  ]
+}

@@ -1,0 +1,6 @@
+node_modules/
+.orca/
+# 개인 작업 메모·작업자 인계 파일 (저장소에 올리지 않음)
+BRIEF.md
+.handoff-*.md
+.local/
