@@ -40,6 +40,7 @@ import type {
   Job,
   JobStep,
   PreflightView,
+  RecentPr,
   RunSummary,
   RunView,
   Target,
@@ -51,6 +52,8 @@ import type {
 // ── 상태 ──────────────────────────────────────────────────────
 
 const targets = atom<TargetSummary[]>([])
+/** 대상 목록을 한 번이라도 받았거나 끝내 못 받았는가. 그 전에는 "대상이 없음" 대신 불러오는 중으로 보인다. */
+const targetsLoaded = atom(false)
 /** 마지막에 고른 대상(작업공간으로 못 고를 때 쓴다). */
 const targetId = atom('targetId', '', { persist: 'plugin' })
 const workspace = atom<Workspace | null>(null)
@@ -65,6 +68,9 @@ const jobs = atom<Record<string, Job>>({})
 const error = atom<string | null>(null)
 /** 이 화면에서 Plan 을 눌러 띄운 작업. 그 작업의 결과만 반영 목록으로 연다(늦게 온 다른 plan 결과가 끼지 않게). */
 const pendingPlan = atom<string | null>(null)
+/** 대상 저장소 main 에 최근 병합된 PR. null 은 불러오는 중. */
+const prs = atom<RecentPr[] | null>(null)
+const prsError = atom<string | null>(null)
 
 // 대상 설정 편집
 const editing = atom<{ draft: Target; previousId: string | null; credUser: string | null; netrc: boolean } | null>(null)
@@ -80,7 +86,7 @@ const configCheck = atom<{ jobId: string; target: string; result: string | null;
 
 const STEP_LABEL: Record<JobStep, string> = {
   check: '준비 확인',
-  plan: 'plan',
+  plan: '반영 목록 만들기',
   backup: '백업',
   upload: '업로드',
   verify: '대조',
@@ -117,6 +123,7 @@ async function loadTargets(): Promise<void> {
   const list = await ask(() => plugin.request('targets.list'))
   if (!list) return
   set(targets, list)
+  set(targetsLoaded, true)
   const ws = read(workspace)
   const current = read(targetId)
   if (ws?.target && list.some((t) => t.id === ws.target)) {
@@ -157,7 +164,9 @@ function chooseTarget(id: string, force = false): void {
   set(detail, null)
   set(runs, [])
   set(pendingPlan, null)
+  set(spec, '')
   void loadRuns()
+  void loadPrs()
 }
 
 /** 작업 기록을 파일에서 다시 읽는다. 이벤트를 놓쳐 "도는 중"으로 남은 작업도 이것으로 바로잡힌다. */
@@ -171,6 +180,7 @@ async function refresh(): Promise<void> {
   await detectWorkspace()
   await loadTargets()
   await loadJobs()
+  void loadPrs()
   const id = read(runId)
   if (id) await loadRun(id)
 }
@@ -183,35 +193,71 @@ function openRun(id: string): void {
 
 // ── 동작 ──────────────────────────────────────────────────────
 
-async function runCheck(): Promise<void> {
-  act()
-  const target = read(targetId)
-  const s = read(spec).trim()
-  if (!target || !s) return
-  set(checking, true)
-  set(preflight, null)
-  set(runId, null)
-  set(detail, null)
-  const view = await ask(() => plugin.request('check', { target, spec: s }, { timeoutMs: 120000 }))
-  set(checking, false)
-  if (view && read(targetId) === target) set(preflight, { target, spec: s, view })
+async function loadPrs(): Promise<void> {
+  const id = read(targetId)
+  set(prsError, null)
+  if (!id) return set(prs, [])
+  set(prs, null)
+  try {
+    const list = await plugin.request('prs.recent', { target: id }, { timeoutMs: 60000 })
+    if (read(targetId) === id) set(prs, list)
+  } catch (e) {
+    if (read(targetId) === id) {
+      set(prs, [])
+      set(prsError, message(e))
+    }
+  }
 }
 
-async function start(step: JobStep, extra: { spec?: string; run?: string; code?: string }): Promise<string | null> {
+async function start(step: JobStep, extra: { spec?: string; run?: string; code?: string; backup?: boolean }): Promise<string | null> {
   const target = read(targetId)
   const r = await ask(() => plugin.request('job.start', plain({ step, target, ...extra })))
   return r?.jobId ?? null
 }
 
-async function runPlan(): Promise<void> {
-  act()
+/** PR 을 고르거나 직접 입력: 고르기만 한다. 다른 것을 고르면 앞의 준비 확인·반영 목록은 내린다. */
+function selectSpec(value: string): void {
+  set(spec, value)
   const p = read(preflight)
-  if (!p?.view.ok) return
+  if (p && p.spec !== value.trim()) {
+    set(preflight, null)
+    set(runId, null)
+    set(detail, null)
+    set(pendingPlan, null)
+  }
+}
+
+/** 처음 화면으로: 고른 PR·준비 확인·열린 반영 목록을 비운다. run 은 지우지 않는다(run 기록 탭에 남음). */
+function resetDeploy(): void {
+  act()
+  set(spec, '')
+  set(preflight, null)
   set(runId, null)
   set(detail, null)
   set(pendingPlan, null)
-  const jobId = await start('plan', { spec: p.spec })
-  if (jobId && read(targetId) === p.target) set(pendingPlan, jobId)
+  void plugin.request('status.reset').catch(() => {})
+}
+
+/** 반영 목록 만들기: 준비 확인 → (통과하면) plan → 백업. 운영은 읽기만 한다.
+ *  준비 확인이 실패하면 그 자리에서 멈추고 할 일을 보여 준다. */
+async function prepare(text: string): Promise<void> {
+  act()
+  const target = read(targetId)
+  const s = text.trim()
+  if (!target || !s || read(checking) || activeJob(target)) return
+  set(spec, s)
+  set(checking, true)
+  set(preflight, null)
+  set(runId, null)
+  set(detail, null)
+  set(pendingPlan, null)
+  const view = await ask(() => plugin.request('check', { target, spec: s }, { timeoutMs: 120000 }))
+  set(checking, false)
+  if (!view || read(targetId) !== target) return
+  set(preflight, { target, spec: s, view })
+  if (!view.ok) return
+  const jobId = await start('plan', { spec: s, backup: true })
+  if (jobId && read(targetId) === target) set(pendingPlan, jobId)
 }
 
 async function runStep(step: 'backup' | 'upload' | 'verify' | 'rollback'): Promise<void> {
@@ -238,6 +284,7 @@ function onJob(job: Job): void {
   if (job.state === 'done' || job.state === 'failed') {
     if (job.run && read(runId) === job.run) void loadRun(job.run)
     void loadRuns()
+    if (job.step === 'plan' || job.step === 'upload' || job.step === 'rollback') void loadPrs()
   }
 }
 
@@ -352,21 +399,34 @@ async function firstLoad(signal: AbortSignal): Promise<void> {
     try {
       const list = await plugin.request('targets.list')
       set(targets, list)
+      set(targetsLoaded, true)
       set(error, null)
       break
     } catch (e) {
-      if (i === 7) set(error, `워커에 연결하지 못함: ${message(e)} — 다시 불러오기를 누르세요`)
+      if (i === 7) {
+        set(error, `워커에 연결하지 못함: ${message(e)} — 다시 불러오기를 누르세요`)
+        set(targetsLoaded, true)
+      }
       await new Promise((r) => setTimeout(r, 1500))
     }
   }
   await detectWorkspace()
   await loadTargets()
   await loadJobs()
+  await loadPrs()
 }
 
 export function setup(ctx: PanelContext): void {
   ctx.subscriptions.push(plugin.on('job.changed', onJob))
   void firstLoad(ctx.signal)
+  // 보이는지를 1초마다 워커에 알린다(상태 표시줄을 다시 누르면 닫기). 패널이 닫히며 못 알려도
+  // 워커는 3초 넘게 소식이 없으면 안 보이는 것으로 본다.
+  const report = () => void plugin.request('panel.visible', { visible: read(ctx.visible) }).catch(() => {})
+  report()
+  const timer = setInterval(report, 1000)
+  // 시험(Node)에서 패널을 닫지 못하고 끝나도 프로세스를 붙잡지 않게.
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  ctx.signal.addEventListener('abort', () => clearInterval(timer))
 }
 
 // ── 화면 ──────────────────────────────────────────────────────
@@ -393,6 +453,7 @@ function TargetCard() {
   const list = read(targets)
   const t = currentTarget()
   const ws = read(workspace)
+  if (!list.length && !read(targetsLoaded)) return <Spinner label="대상 불러오는 중" />
   if (!list.length)
     return (
       <EmptyState title="대상이 없음" description="대상 설정 탭에서 대상을 추가하세요." icon="settings">
@@ -454,43 +515,84 @@ function TargetCard() {
   )
 }
 
-function PreflightCard() {
-  const p = read(preflight)
-  const busy = read(checking)
+const DEPLOY_LABEL: Record<NonNullable<RecentPr['deploy']>, string> = {
+  deployed: '반영됨',
+  partial: '부분 업로드',
+  planned: '목록 만듦'
+}
+
+/** 병합 시각을 "11-06 18:08" 처럼 짧게. */
+function shortTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function ChangeCard() {
   const t = currentTarget()
   if (!t) return null
+  const p = read(preflight)
+  const busy = read(checking)
+  const locked = busy || !!activeJob(t.id)
+  const list = read(prs)
+  const current = read(spec)
   return (
-    <Card title="반영할 변경" description="PR 번호(#123), 커밋, 또는 기준..끝">
+    <Card title="반영할 PR" description="PR 을 고르고 반영 목록 만들기를 누르세요 (준비 확인 → plan → 백업, 운영은 읽기만)">
       <Stack gap="sm">
-        <Box direction="row" gap="xs" align="center">
-          <Box grow>
-            <Input
-              label="PR 번호 또는 커밋"
-              labelHidden
-              placeholder="#123 · a1b2c3d4 · 기준..끝"
-              value={read(spec)}
-              onChange={(v) => {
-                set(spec, v)
-                if (read(preflight)?.spec !== v.trim()) set(preflight, null)
-              }}
-              onSubmit={() => void runCheck()}
-            />
+        {list === null ? (
+          <Spinner label="병합된 PR 불러오는 중" />
+        ) : list.length > 0 ? (
+          <Box border radius="md" maxHeight={300} scroll="y">
+            <List label="최근 병합된 PR">
+              {list.map((pr) => (
+                <ListItem
+                  key={`pr${pr.number}`}
+                  icon={pr.deploy === 'deployed' ? 'check' : pr.deploy === 'partial' ? 'warning' : 'branch'}
+                  title={`#${pr.number} ${pr.title}`}
+                  description={[shortTime(pr.mergedAt), pr.deploy ? DEPLOY_LABEL[pr.deploy] : ''].filter(Boolean).join(' · ')}
+                  current={current === `#${pr.number}`}
+                  disabled={locked}
+                  onPress={() => selectSpec(`#${pr.number}`)}
+                />
+              ))}
+            </List>
           </Box>
-          <Button icon="check" variant="outline" disabled={busy || !read(spec).trim()} onPress={runCheck}>
-            준비 확인
+        ) : (
+          <Text muted size="sm">
+            {read(prsError) ? `PR 목록을 받지 못함: ${read(prsError)}` : '최근 병합된 PR 없음'}
+          </Text>
+        )}
+        <Input
+          label="PR 번호 또는 커밋"
+          labelHidden
+          placeholder="고른 PR · 직접 입력: #123 · 커밋 · 기준..끝"
+          value={current}
+          onChange={(v) => selectSpec(v)}
+          onSubmit={() => void prepare(read(spec))}
+        />
+        <Box direction="row" gap="xs" justify="end">
+          <Button icon="close" variant="ghost" disabled={locked} onPress={resetDeploy}>
+            초기화
+          </Button>
+          <Button icon="play" tone="accent" disabled={locked || !current.trim()} onPress={() => prepare(read(spec))}>
+            반영 목록 만들기
           </Button>
         </Box>
         {busy && <Spinner label="준비 확인 중 (fetch·PR 조회)" />}
-        {p && (
+        {p && p.view.ok && (
+          <Text size="xs" muted>
+            {`✓ 준비 확인 통과 — ${p.view.items.map((i) => i.title).join(' · ')}`}
+          </Text>
+        )}
+        {p && !p.view.ok && (
           <Stack gap="sm">
             <Separator />
             <Stack gap="xs">
-              <Text weight="semibold">{p.view.subject ?? '준비 확인'}</Text>
-              {p.view.pr && (
-                <Text size="xs" muted>
-                  {`PR #${p.view.pr.number} ${p.view.pr.title}`}
-                </Text>
-              )}
+              <Text weight="semibold">{p.view.subject ?? p.spec}</Text>
+              <Text size="xs" tone="danger">
+                준비 확인에서 멈춤 — 아래를 고친 뒤 다시 확인하세요
+              </Text>
             </Stack>
             <List label="준비 확인">
               {p.view.items.map((i) => (
@@ -504,17 +606,9 @@ function PreflightCard() {
                   <CodeView code={i.fix!} language="powershell" wrap />
                 </Field>
               ))}
-            {p.view.pr?.notes && (
-              <Callout tone="accent" title={`PR #${p.view.pr.number} 반영 시 주의`} icon="info">
-                <Markdown content={p.view.pr.notes} />
-              </Callout>
-            )}
-            <Box direction="row" gap="xs" justify="end">
-              <Button icon="refresh" variant="ghost" onPress={runCheck}>
+            <Box direction="row" justify="end">
+              <Button icon="refresh" variant="outline" disabled={locked} onPress={() => prepare(p.spec)}>
                 다시 확인
-              </Button>
-              <Button icon="play" tone="accent" disabled={!p.view.ok || !!activeJob(t.id)} onPress={runPlan}>
-                Plan
               </Button>
             </Box>
           </Stack>
@@ -672,23 +766,36 @@ function RunCard() {
             </Stack>
           </Callout>
         )}
-        {v.status !== 'blocked' && v.status !== 'rolledBack' && (
+        {(v.status === 'planned' || v.status === 'backedUp') && (
           <Stack gap="xs" align="stretch">
             <Separator />
-            <Button icon="download" variant="outline" disabled={busy || !canBackup} onPress={() => runStep('backup')}>
-              {v.status === 'backedUp' ? '1  다시 백업' : '1  Backup'}
-            </Button>
-            <Button icon="upload" tone="danger" disabled={busy || !canUpload} onPress={() => runStep('upload')}>
-              {`2  ${v.label}에 ${v.total}개 업로드`}
-            </Button>
-            <Button icon="check" variant="outline" disabled={busy || !canVerify} onPress={() => runStep('verify')}>
-              3  Verify
-            </Button>
-            {(v.status === 'planned' || v.status === 'backedUp') && (
-              <Text size="xs" muted>
-                업로드 전에 백업을 받습니다. 업로드 버튼을 누르는 것이 최종 확인입니다.
-              </Text>
+            {v.status === 'planned' && (
+              <>
+                <Text size="xs" muted>
+                  백업이 아직 없음 — 백업을 받아야 올릴 수 있습니다.
+                </Text>
+                <Button icon="download" variant="outline" disabled={busy || !canBackup} onPress={() => runStep('backup')}>
+                  백업
+                </Button>
+              </>
             )}
+            <Button icon="upload" tone="danger" disabled={busy || !canUpload} onPress={() => runStep('upload')}>
+              {`${v.label}에 ${v.total}개 업로드`}
+            </Button>
+            <Text size="xs" muted>
+              누르면 운영 파일을 다시 대조한 뒤 올리고, 올린 뒤 바로 대조합니다. 이 버튼이 최종 확인입니다.
+            </Text>
+          </Stack>
+        )}
+        {v.status === 'uploaded' && (
+          <Stack gap="xs" align="stretch">
+            <Separator />
+            <Text size="xs" muted>
+              {v.verifyFailed ? '올린 뒤 대조가 맞지 않았습니다. 다시 대조하거나 되돌리세요.' : '업로드는 끝났고 대조가 아직 없습니다.'}
+            </Text>
+            <Button icon="check" variant="outline" disabled={busy || !canVerify} onPress={() => runStep('verify')}>
+              다시 대조
+            </Button>
           </Stack>
         )}
         {v.status === 'partial' && (
@@ -739,7 +846,7 @@ function DeployTab() {
   return (
     <Stack gap="md">
       <TargetCard />
-      <PreflightCard />
+      <ChangeCard />
       <RunCard />
     </Stack>
   )

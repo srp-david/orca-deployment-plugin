@@ -30,7 +30,8 @@ function host(workspaces: { name: string; branch: string; path: string }[]) {
         workspaces: workspaces.map((w, i) => ({ id: `w${i}`, kind: 'folder', hostId: null, ...w })),
         truncated: false
       },
-      'statusBar.update': { ok: true }
+      'statusBar.update': { ok: true },
+      'commands.run': { ran: true }
     }
   })
 }
@@ -111,5 +112,24 @@ test('작업 시작: 다른 대상의 run 이나 확인 코드 없는 업로드�
   } catch (e) {
     assert.match(String((e as Error).message), /PR 번호 또는 커밋/)
   }
+  await worker.deactivate()
+})
+
+test('상태 표시줄 명령: 패널이 보이면 오른쪽 사이드바를 닫는다', async () => {
+  const h = host([])
+  const worker = await mountWorker(main, { host: h })
+  await worker.request('panel.visible', { visible: true })
+  await worker.command('openPanel')
+  assert.deepEqual(h.callsOf('commands.run'), [{ action: 'sidebar.right.toggle' }])
+  assert.deepEqual(h.refusals, [])
+  await worker.deactivate()
+})
+
+test('상태 표시줄 초기화: 도는 작업이 없으면 처음 모양(운영 반영)으로', async () => {
+  const h = host([])
+  const worker = await mountWorker(main, { host: h })
+  await worker.request('status.reset')
+  const last = h.callsOf('statusBar.update').at(-1) as { id: string; text: string; icon: string; tone: string }
+  assert.deepEqual(last, { id: 'deploy', text: '운영 반영', icon: 'rocket', tone: 'neutral' })
   await worker.deactivate()
 })

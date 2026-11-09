@@ -1,0 +1,17 @@
+[
+  ["ask", "node C:/w/orca-prod-deploy/src/cli.ts upload gg-1 --plan f --yes"],
+  ["ask", "cd C:/w && node src/cli.ts rollback run1 --plan x --yes"],
+  ["ask", "PRODDEPLOY_HOME=x node \"C:/x/src/cli.ts\" unlock gg"],
+  ["ask", "node \"C:/x/src/cli.ts\" \"upload\" gg-1 --plan f --yes"],
+  ["ask", "printf \"u\\np\" | node src/cli.ts creds gg set"],
+  ["ask", "node src/cli.ts creds gg"],
+  ["ask", "bash ~/.claude/skills/prod-deploy/scripts/deploy.sh upload run --plan x --yes"],
+  ["ask", "bash \"C:/x/deploy.sh\" rollback run --plan x --yes"],
+  ["pass", "node src/cli.ts plan --target gg \"#160\""],
+  ["pass", "node src/cli.ts backup gg-1"],
+  ["pass", "node src/cli.ts verify gg-1"],
+  ["pass", "node src/cli.ts show gg-1"],
+  ["pass", "node src/cli.ts runs --target gg"],
+  ["pass", "git commit -m \"upload fix\""],
+  ["pass", "orca plugin shot local.prod-deploy --panel deploy"]
+]

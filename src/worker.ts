@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { credentialUser, deleteCredential, writeCredential } from './engine/creds.ts'
+import { mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
 import { clearStaleLock, listRuns, openRun } from './engine/runs.ts'
@@ -15,6 +16,7 @@ import {
   detectTarget,
   listTargets,
   loadTarget,
+  mainBranch,
   netrcPath,
   saveTarget,
   validateTarget,
@@ -22,7 +24,8 @@ import {
 } from './engine/target.ts'
 import { Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
-import type { RunSummary, TargetSummary, Workspace } from './protocol.ts'
+import { openPanel } from './open-panel.ts'
+import type { RecentPr, RunSummary, TargetSummary, Workspace } from './protocol.ts'
 
 // Orca 는 워커에 정해진 환경변수만 넘긴다. gh·git 이 설정을 찾도록 빠진 것을 채운다.
 const profile = process.env.USERPROFILE ?? ''
@@ -33,7 +36,7 @@ const CLI = fileURLToPath(new URL('./cli.ts', import.meta.url))
 
 const LABEL: Record<JobStep, string> = {
   check: '준비 확인',
-  plan: 'plan',
+  plan: '반영 목록 만들기',
   backup: '백업',
   upload: '업로드',
   verify: '대조',
@@ -71,6 +74,35 @@ function summary(t: Target): TargetSummary {
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
+  // 상태 표시줄 항목·명령 팔레트: 패널이 보이면 오른쪽 사이드바를 닫고, 아니면 패널을 연다.
+  let panelSeen = { visible: false, at: 0 }
+  orca.panels.handle('status.reset', () =>
+    guard(async () => {
+      const busy = listJobs().some((j) => j.state === 'running' || j.state === 'starting')
+      if (!busy) await status(null)
+      return { ok: true as const }
+    })
+  )
+
+  orca.panels.handle('panel.visible', ({ visible }) => {
+    panelSeen = { visible, at: Date.now() }
+    return { ok: true as const }
+  })
+  orca.commands.register('openPanel', async () => {
+    if (panelSeen.visible && Date.now() - panelSeen.at < 3000) {
+      try {
+        await orca.host.call('commands.run', { action: 'sidebar.right.toggle' })
+        panelSeen = { visible: false, at: Date.now() }
+        return undefined
+      } catch (e) {
+        orca.log(`사이드바 닫기 실패: ${(e as Error).message}`)
+        return `사이드바를 닫지 못함: ${(e as Error).message}`
+      }
+    }
+    const why = await openPanel()
+    if (why) orca.log(`패널 열기 실패: ${why}`)
+    return why ?? undefined
+  })
   const watched = new Map<string, string>()
   /** 이 워커가 띄운 CLI 의 프로세스 번호(작업 id → pid). */
   const spawned = new Map<string, number>()
@@ -131,7 +163,7 @@ export default function activate(orca: OrcaWorkerApi): void {
           void orca.host
             .call('notifications.show', {
               title: `운영 반영: ${job.target} ${LABEL[job.step]} ${job.state === 'done' ? '끝' : '실패'}`,
-              body: job.message ?? undefined
+              ...(job.message ? { body: job.message } : {})
             })
             .catch(() => {})
         }
@@ -228,7 +260,25 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   )
 
-  orca.panels.handle('job.start', ({ step, target, spec, run, code }) =>
+  orca.panels.handle('prs.recent', ({ target }) =>
+    guard(async (): Promise<RecentPr[]> => {
+      const t = loadTarget(target)
+      const prs = await mergedPrs(t.repo, mainBranch(t))
+      // 이 대상에서 PR 별로 가장 앞선 run 상태
+      const rank = { deployed: 3, partial: 2, planned: 1 } as const
+      const best = new Map<number, keyof typeof rank>()
+      for (const r of listRuns(t)) {
+        const v = viewRun(r)
+        if (!v.pr) continue
+        const s = v.status === 'uploaded' || v.status === 'verified' ? 'deployed' : v.status === 'partial' ? 'partial' : v.status === 'planned' || v.status === 'backedUp' ? 'planned' : null
+        const cur = best.get(v.pr.number)
+        if (s && (!cur || rank[s] > rank[cur])) best.set(v.pr.number, s)
+      }
+      return prs.map((p) => ({ number: p.number, title: p.title, mergedAt: p.mergedAt, deploy: best.get(p.number) ?? null }))
+    })
+  )
+
+  orca.panels.handle('job.start', ({ step, target, spec, run, code, backup }) =>
     guard(() => {
       const t = loadTarget(target)
       if (!existsSync(CLI)) throw new Stop(`CLI 를 찾지 못함: ${CLI}`)
@@ -238,6 +288,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (step === 'plan') {
         if (!spec) throw new Stop('PR 번호 또는 커밋이 필요함')
         args.push('--target', target, spec)
+        if (backup) args.push('--backup')
       } else {
         if (!run) throw new Stop('run 이 필요함')
         const r = openRun(run)

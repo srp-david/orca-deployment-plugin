@@ -263,6 +263,22 @@ async function scenarios(tip1: string): Promise<void> {
     assert.match(r.out, /되돌린 run/)
   })
 
+  await step('패널의 두 버튼: plan --backup 은 백업까지, upload 는 대조까지', () => {
+    const p = cli('plan', '--target', 'fx', tip1, '--backup')
+    assert.equal(p.code, 0, p.out)
+    assert.match(p.out, /백업 완료/)
+    const run2 = runOf(p.out)
+    const code2 = codeOf(p.out)
+    assert.match(cli('show', run2).out, /\(백업됨\)/)
+    const u = cli('upload', run2, '--plan', code2, '--yes')
+    assert.equal(u.code, 0, u.out)
+    assert.match(u.out, /운영 = 로컬 5\/5/)
+    assert.match(cli('show', run2).out, /\(대조됨\)/)
+    // 다음 시나리오를 위해 직전 상태로
+    assert.equal(cli('rollback', run2, '--plan', code2, '--yes').code, 0)
+    assert.equal(ftpText('ui/a.xml'), '<a>base</a>\n')
+  })
+
   await step('운영에만 있는 수정이면 막힘', () => {
     write(ftpFile('ui/a.xml'), '<a>hotfix on prod</a>\n')
     const r = cli('plan', '--target', 'fx', tip1)

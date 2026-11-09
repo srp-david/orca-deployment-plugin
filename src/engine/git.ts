@@ -75,6 +75,22 @@ export async function viewPr(repo: string, n: number): Promise<PullRequest> {
   }
 }
 
+export type MergedPr = { number: number; title: string; mergedAt: string; mergeCommit: string | null }
+
+/** 대상 저장소의 main 에 최근 병합된 PR (최근 것부터). */
+export async function mergedPrs(repo: string, base: string, limit = 10): Promise<MergedPr[]> {
+  const r = await exec(
+    'gh',
+    ['pr', 'list', '--state', 'merged', '--base', base, '--limit', String(limit), '--json', 'number,title,mergedAt,mergeCommit'],
+    { cwd: toNative(repo), timeoutMs: 30000 }
+  )
+  if (r.code !== 0) throw new Stop(`병합된 PR 목록을 받지 못함: ${r.err.trim().split('\n')[0] ?? ''}`)
+  const list = JSON.parse(r.out.toString('utf8')) as { number: number; title?: string; mergedAt?: string; mergeCommit?: { oid?: string } | null }[]
+  return list
+    .map((p) => ({ number: p.number, title: p.title ?? '', mergedAt: p.mergedAt ?? '', mergeCommit: p.mergeCommit?.oid ?? null }))
+    .sort((a, b) => (a.mergedAt < b.mergedAt ? 1 : a.mergedAt > b.mergedAt ? -1 : 0))
+}
+
 /** PR 본문에서 "반영 시 주의" 절만 꺼낸다(제목 줄부터 같은 단계 이상의 다음 제목 전까지). */
 export function deployNotes(body: string): string | null {
   const lines = body.replace(/\r/g, '').split('\n')

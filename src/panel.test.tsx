@@ -50,6 +50,10 @@ function host(status: string, started: unknown[]) {
       'targets.list': targets,
       'jobs.recent': [],
       'runs.list': [],
+      'prs.recent': [
+        { number: 124, title: 'PR 124', mergedAt: '2026-11-07T01:00:00Z', deploy: null },
+        { number: 123, title: 'PR 123', mergedAt: '2026-11-06T09:00:00Z', deploy: 'deployed' }
+      ],
       check: { ok: true, items: [{ id: 'merged', ok: true, title: 'PR #123 병합됨', detail: [] }], subject: 'abcdef1 PR 123', tip: 't', pr: null },
       'job.start': (input: unknown) => {
         started.push(input)
@@ -63,9 +67,9 @@ function host(status: string, started: unknown[]) {
 async function planned(status: string) {
   const started: unknown[] = []
   const v = await mount(panel, { host: host(status, started) })
-  await v.type({ label: 'PR 번호 또는 커밋' }, '#123')
-  await v.press({ text: '준비 확인' })
-  await v.press({ text: 'Plan' })
+  await v.settled()
+  await v.press({ label: '#123 PR 123' })
+  await v.press({ text: '반영 목록 만들기' })
   await v.post('job.changed', {
     id: 'j1', step: 'plan', target: 'myapp', run: 'myapp-20261106-180000-abcdef12', spec: '#123',
     state: 'done', message: null, progress: null, lines: [], startedAt: Date.now(), endedAt: Date.now(), pid: 1
@@ -84,7 +88,7 @@ test('작업공간 저장소로 대상을 고르고 FTP·운영 루트를 보여
 
 test('plan 뒤: 업로드 버튼에 대상 이름과 파일 수, 백업 전에는 꺼짐', async () => {
   const { v, started } = await planned('planned')
-  assert.deepEqual(started[0], { step: 'plan', target: 'myapp', spec: '#123' })
+  assert.deepEqual(started[0], { step: 'plan', target: 'myapp', spec: '#123', backup: true })
   const up = v.find({ text: /My App에 2개 업로드$/ })
   assert.ok(up, JSON.stringify(v.summary()))
   assert.equal(up!.disabled, true)
@@ -102,9 +106,43 @@ test('백업 뒤 업로드를 누르면 그 run 과 확인 코드로 업로드�
 
 test('Backup 요청에는 undefined 칸이 없다 — Orca 가 "input: Invalid input" 으로 거절함', async () => {
   const { v, started } = await planned('planned')
-  await v.press({ text: /Backup$/ })
+  await v.press({ text: '백업' })
   assert.deepEqual(started[1], { step: 'backup', target: 'myapp', run: 'myapp-20261106-180000-abcdef12' })
   assert.ok(!Object.values(started[1] as object).includes(undefined))
+  await v.unmount()
+})
+
+test('반영 목록 만들기: 준비 확인이 실패하면 plan 을 시작하지 않고 할 일을 보여 준다', async () => {
+  const started: unknown[] = []
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'runs.list': [],
+        'prs.recent': [{ number: 123, title: 'PR 123', mergedAt: '2026-11-06T09:00:00Z', deploy: null }],
+        check: {
+          ok: false,
+          items: [{ id: 'pulled', ok: false, title: 'main pull 됨', detail: ['origin/main 보다 1커밋 뒤'], fix: 'git -C "C:/work/repos/my-app" pull --ff-only' }],
+          subject: null,
+          tip: null,
+          pr: null
+        },
+        'job.start': (input: unknown) => {
+          started.push(input)
+          return { jobId: 'j1' }
+        }
+      }
+    })
+  })
+  await v.settled()
+  await v.press({ label: '#123 PR 123' })
+  await v.press({ text: '반영 목록 만들기' })
+  assert.deepEqual(started, [])
+  assert.ok(v.find({ text: /준비 확인에서 멈춤/ }))
+  assert.ok(v.find({ text: /pull --ff-only/ }))
+  assert.ok(v.find({ text: '다시 확인' }))
   await v.unmount()
 })
 
@@ -121,7 +159,7 @@ test('작업공간으로 못 정하면 시험용 대상은 자동으로 고르�
   })
   assert.equal(v.valueOf({ label: '대상' }), '')
   assert.ok(v.find({ text: /대상을 직접 고르세요/ }))
-  assert.equal(v.find({ text: '준비 확인' }), null)
+  assert.equal(v.find({ text: '반영 목록 만들기' }), null)
   await v.unmount()
 })
 
@@ -129,7 +167,29 @@ test('대상을 바꾸면 준비 확인과 plan 을 버린다', async () => {
   const { v } = await planned('backedUp')
   await v.select({ label: '대상' }, 'test')
   assert.equal(v.find({ text: /에 2개 업로드/ }), null)
-  assert.equal(v.find({ text: 'Plan' }), null)
+  assert.equal(v.find({ text: /확인 코드/ }), null)
   assert.ok(v.find({ text: '시험용 대상' }))
+  await v.unmount()
+})
+
+test('PR 을 누르면 고르기만 하고, 반영 목록 만들기를 눌러야 시작한다', async () => {
+  const started: unknown[] = []
+  const v = await mount(panel, { host: host('planned', started) })
+  await v.settled()
+  await v.press({ label: '#124 PR 124' })
+  assert.deepEqual(started, [])
+  assert.equal(v.valueOf({ label: 'PR 번호 또는 커밋' }), '#124')
+  await v.press({ text: '반영 목록 만들기' })
+  assert.deepEqual(started[0], { step: 'plan', target: 'myapp', spec: '#124', backup: true })
+  await v.unmount()
+})
+
+test('초기화: 고른 PR·준비 확인·반영 목록을 비운다', async () => {
+  const { v } = await planned('backedUp')
+  assert.ok(v.find({ text: /My App에 2개 업로드$/ }))
+  await v.press({ text: '초기화' })
+  assert.equal(v.find({ text: /My App에 2개 업로드$/ }), null)
+  assert.equal(v.find({ text: /준비 확인 통과/ }), null)
+  assert.equal(v.valueOf({ label: 'PR 번호 또는 커밋' }), '')
   await v.unmount()
 })

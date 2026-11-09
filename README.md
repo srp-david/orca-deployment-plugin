@@ -3,8 +3,8 @@
 저장소에서 바뀐 파일을 운영 서버에 **FTP로 반영**하는 Orca 오른쪽 사이드바 패널입니다. IntelliJ의 FTP Deployment처럼 대상(서버)마다 경로 매핑을 두고, PR 하나 또는 커밋 하나를 단위로 다음 순서로 진행합니다.
 
 ```
-대상 고르기 → PR 번호/커밋 입력 → 준비 확인 → Plan(반영 목록) → Backup → Upload → Verify
-                                                               └ 문제가 생기면 → 되돌리기(Rollback)
+대상 → PR 고르기 → [반영 목록 만들기] 준비 확인 → plan → 백업 → 반영 목록 확인 → [업로드] 재대조 → 업로드 → 대조
+                                                                          └ 문제가 생기면 → 되돌리기
 ```
 
 압축 푼 WAR에 바뀐 파일만 올리는 Java 웹 애플리케이션 운영을 기준으로 만들었습니다. **이 도구는 파일만 다룹니다.** SQL 마이그레이션, 톰캣 재기동, 메뉴 등록, 재로그인 확인은 사람이 합니다.
@@ -176,13 +176,22 @@ node src/cli.ts creds myapp status
 
 반영 전 준비(사람이 함): PR 을 main 에 병합 → **메인 체크아웃을 main 으로 바꾸고 pull** → Java 가 바뀌었으면 메인 체크아웃에서 빌드.
 
+패널에서 누르는 것은 두 번입니다.
+
+1. PR 을 고르고 **반영 목록 만들기** → 준비 확인 → plan → 백업(운영은 읽기만)
+2. **`<대상 이름>에 N개 업로드`** → 직전 재대조 → 업로드 → 대조
+
+상태 표시줄의 **운영 반영**을 누르면 패널이 열리고, 패널이 보일 때 다시 누르면 오른쪽 사이드바가 닫힙니다.
+
 ### 4-1. 대상
 
 패널은 지금 Orca 작업공간의 저장소로 대상을 고릅니다. 못 고르면 마지막에 고른 대상을 쓰고, 그것도 없으면 직접 고르게 합니다(시험용 대상은 자동으로 고르지 않습니다). FTP 주소·운영 루트·메인 체크아웃이 늘 보입니다. 작업공간 저장소와 대상의 저장소가 다르면 경고합니다.
 
-### 4-2. 준비 확인
+### 4-2. 반영할 PR → 반영 목록 만들기
 
-PR 번호(`#123`), 커밋 해시, 또는 `기준..끝` 구간을 넣고 **준비 확인**.
+"반영할 PR" 카드에 대상 저장소 main 에 최근 병합된 PR 이 나옵니다(`gh pr list`). 이 패널로 이미 올린 PR 은 **반영됨**, 목록까지 만든 PR 은 **목록 만듦**으로 표시합니다. PR 을 누르면 고르기만 합니다(아래 칸에 `#번호`가 채워짐). 커밋 해시나 `기준..끝` 구간은 그 칸에 직접 넣습니다. **반영 목록 만들기**를 누르면 아래를 차례로 합니다. **초기화**는 고른 PR·준비 확인·열린 반영 목록을 비우고 처음 화면으로 돌아갑니다(만든 run 은 run 기록에 남음).
+
+**준비 확인** — 하나라도 실패하면 여기서 멈추고 할 일을 보여 줍니다(명령은 선택해서 복사). 고친 뒤 **다시 확인**.
 
 | 확인 | 실패하면 |
 |---|---|
@@ -192,15 +201,12 @@ PR 번호(`#123`), 커밋 해시, 또는 `기준..끝` 구간을 넣고 **준비
 | 바뀐 파일에 커밋 안 한 수정이 없는가 | 수정 정리 |
 | 바뀐 Java 의 class 가 main 소스로 빌드됐는가(있음·소스보다 새것·버전) | 빌드 명령 |
 
-할 일 명령은 선택해서 복사할 수 있게 보여 줍니다. 고친 뒤 **다시 확인**. PR 본문에 "반영 시 주의" 절이 있으면 함께 보여 줍니다.
-
-### 4-3. Plan (운영 읽기만)
-
-바뀐 파일을 운영 경로로 바꾸고, 운영의 지금 파일을 받아 반영 커밋·직전 커밋과 대조합니다. 결과:
+**plan (운영 읽기만)** — 바뀐 파일을 운영 경로로 바꾸고, 운영의 지금 파일을 받아 반영 커밋·직전 커밋과 대조합니다.
 
 - **반영 목록**: 파일마다 덮어씀/새 파일, 로컬 → 운영 경로, 메모
 - 손 처리 파일, 매핑 밖 파일, 빌드 폴더의 옛 내부 클래스(올리지 않음)
-- **문제**: 하나라도 있으면 그 run 은 올리지 못합니다. 고친 뒤 새로 plan 합니다.
+- PR 본문의 "반영 시 주의" 절
+- **문제**: 하나라도 있으면 그 run 은 올리지 못합니다. 고친 뒤 다시 만듭니다.
   - 운영본이 이미 반영 커밋과 같음(이미 반영됨?)
   - 운영본이 직전 커밋과 다름(운영에만 있는 수정?)
   - 저장소엔 새 파일인데 운영에 이미 있음
@@ -209,11 +215,14 @@ PR 번호(`#123`), 커밋 해시, 또는 `기준..끝` 구간을 넣고 **준비
   - 운영 폴더 목록을 확인할 수 없음(권한·시간 초과)
 - **확인 코드**: 이 대상과 반영 목록을 가리키는 8자리 코드
 
-### 4-4. Backup → Upload → Verify
+**백업** — 문제가 없으면 이어서 덮어쓸 운영 파일을 run 폴더에 받고 plan 때와 같은지 확인합니다. 백업이 실패하면 run 카드에 **백업** 버튼이 나옵니다.
 
-1. **Backup**: 덮어쓸 운영 파일을 run 폴더에 받고 plan 때와 같은지 확인합니다.
-2. **Upload**: 버튼에 `<대상 이름>에 N개 업로드` 가 적혀 있습니다. **이 버튼을 누르는 것이 최종 확인입니다.** 업로드 직전에 브랜치·HEAD·로컬 파일·운영 파일을 다시 확인하고, 승인한 바이트를 고정본으로 떠서 그것만 올립니다(파일마다 임시 이름으로 올린 뒤 이름 바꾸기, 다시 받아 대조).
-3. **Verify**: 운영 파일이 올린 파일과 같은지(sha256) 대조합니다.
+### 4-3. 업로드 (→ 대조)
+
+버튼에 `<대상 이름>에 N개 업로드` 가 적혀 있습니다. **이 버튼을 누르는 것이 최종 확인입니다.**
+
+1. 업로드 직전에 브랜치·HEAD·로컬 파일·운영 파일을 다시 확인하고, 승인한 바이트를 고정본으로 떠서 그것만 올립니다(파일마다 임시 이름으로 올린 뒤 이름 바꾸기, 다시 받아 대조).
+2. 다 올리면 이어서 운영 파일이 올린 파일과 같은지(sha256) 대조합니다. 대조가 맞지 않으면 **다시 대조** 버튼과 되돌리기가 나옵니다.
 
 끝나면 남은 사람 할 일(톰캣 재기동, PR 의 SQL·등록 순서, 재로그인 확인, 반영 이력 기록)을 보여 줍니다. 오래 걸리는 단계는 상태 표시줄과 알림으로도 알려 줍니다. 패널을 닫아도 업로드는 끝까지 갑니다.
 
@@ -243,9 +252,9 @@ run 카드의 **되돌리기**: 덮어쓴 파일은 백업으로 되올리고, �
 ```powershell
 node src/cli.ts targets                             # 대상 목록
 node src/cli.ts check  --target myapp "#123"        # 준비 확인
-node src/cli.ts plan   --target myapp "#123"        # plan → run 이름·확인 코드
+node src/cli.ts plan   --target myapp "#123" --backup   # plan(+백업) → run 이름·확인 코드
 node src/cli.ts backup <run>
-node src/cli.ts upload <run> --plan <확인 코드> --yes
+node src/cli.ts upload <run> --plan <확인 코드> --yes   # 올리고 이어서 대조
 node src/cli.ts verify <run>
 node src/cli.ts rollback <run> --plan <확인 코드> --yes
 node src/cli.ts runs   --target myapp               # 지난 run
@@ -254,7 +263,40 @@ node src/cli.ts unlock myapp                        # 끝난 작업이 남긴 �
 node src/cli.ts creds  myapp status|set|delete      # 접속 정보
 ```
 
-`--target` 을 빼면 지금 폴더의 저장소로 대상을 찾습니다. Claude Code 스킬에서 쓸 때는 업로드·되돌리기 전에 반영 목록을 사람에게 보여 주고 승인을 받으며, 훅으로 한 번 더 확인 창을 띄우는 것을 권합니다.
+`--target` 을 빼면 지금 폴더의 저장소로 대상을 찾습니다.
+
+### Claude Code 스킬
+
+`skill/prod-deploy/` 에 Claude Code 스킬(`SKILL.md`)과 확인 훅(`guard-hook.sh`)이 있습니다. Claude 는 준비 확인·plan·backup·verify 를 CLI 로 하고, **업로드·되돌리기는 패널에서 사람이 누르도록 안내**합니다. 사람이 "패널을 못 쓴다"고 할 때만 반영 목록을 보여 주고 승인을 받은 뒤 CLI 로 올립니다.
+
+```powershell
+node skill/install.mjs   # ~/.claude/skills/prod-deploy/ 로 복사 (덮어쓰는 파일은 .backup-<시각>/ 에 남김)
+```
+
+`settings.json` 은 설치 스크립트가 고치지 않습니다. 직접 넣으세요.
+
+```jsonc
+{
+  "permissions": {
+    "ask": [
+      "Bash(node *cli.ts upload *)", "Bash(node *cli.ts rollback *)",
+      "Bash(node *cli.ts unlock *)", "Bash(node *cli.ts creds *)",
+      "PowerShell(node *cli.ts upload *)", "PowerShell(node *cli.ts rollback *)",
+      "PowerShell(node *cli.ts unlock *)", "PowerShell(node *cli.ts creds *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [{ "type": "command", "command": "bash \"C:/Users/<사용자>/.claude/skills/prod-deploy/scripts/guard-hook.sh\"", "timeout": 10 }]
+      }
+    ]
+  }
+}
+```
+
+`permissions.ask` 는 명령 모양이 정확히 맞을 때만 걸리므로, 따옴표·`cd`·환경변수가 붙어도 잡히도록 훅을 함께 둡니다. 훅은 `cli.ts` 의 `upload`·`rollback`·`unlock`·`creds` 에서 확인 창을 띄웁니다(`test/guard-hook.spec.ts`).
 
 ## 8. 데이터 위치와 run 기록
 
@@ -304,7 +346,7 @@ test/         엔진 단위·안전 시험, e2e, 시험 FTP 서버
 시험:
 
 ```powershell
-node --test test/engine.spec.ts test/safety.spec.ts   # 엔진 단위·안전 회귀
+node --test test/engine.spec.ts test/safety.spec.ts test/guard-hook.spec.ts   # 엔진 단위·안전 회귀·스킬 훅
 orca plugin test .                                    # 패널·워커
 orca plugin check .                                   # 패널을 워커와 함께 한 번 그리기
 node test/e2e.ts                                      # 임시 저장소 + 시험 FTP 로 전체 흐름

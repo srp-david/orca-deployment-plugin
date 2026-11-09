@@ -46,6 +46,15 @@ export type RunSummary = {
   subject: string
 }
 
+/** 최근 병합된 PR 과, 이 대상에서 그 PR 로 만든 run 중 가장 앞선 상태. */
+export type RecentPr = {
+  number: number
+  title: string
+  mergedAt: string
+  /** 'deployed' 업로드됨(대조 포함), 'partial' 부분 업로드, 'planned' 목록·백업까지, null 이 패널로 만든 run 없음. */
+  deploy: 'deployed' | 'partial' | 'planned' | null
+}
+
 export type TargetDetail = {
   target: Target
   /** 자격 증명 관리자에 있는 사용자 이름. 없으면 null. */
@@ -67,15 +76,22 @@ declare module 'orca' {
     'workspace.detect': { output: Workspace }
     'check': { input: { target: string; spec: string }; output: PreflightView }
     'job.start': {
-      input: { step: JobStep; target: string; spec?: string; run?: string; code?: string }
+      /** plan 에 backup: true 면 이어서 백업까지(반영 목록 만들기). */
+      input: { step: JobStep; target: string; spec?: string; run?: string; code?: string; backup?: boolean }
       output: { jobId: string }
     }
+    /** 대상 저장소 main 에 최근 병합된 PR. */
+    'prs.recent': { input: { target: string }; output: RecentPr[] }
     'job.get': { input: { id: string }; output: Job | null }
     'jobs.recent': { output: Job[] }
     'runs.list': { input: { target: string }; output: RunSummary[] }
     'run.get': { input: { id: string }; output: { view: RunView; log: string[] } }
     /** 끝난 작업이 남긴 잠금을 푼다. 살아 있는 작업의 잠금이면 거절. */
     'lock.clear': { input: { target: string }; output: { message: string } }
+    /** 패널이 지금 사람에게 보이는지. 상태 표시줄을 누를 때 열지·닫을지 정하는 데 쓴다. */
+    'panel.visible': { input: { visible: boolean }; output: { ok: true } }
+    /** 상태 표시줄을 처음 모양(운영 반영)으로. 도는 작업이 있으면 그대로 둔다. */
+    'status.reset': { output: { ok: true } }
   }
   interface PluginPanelEvents {
     /** 워커가 띄운 작업의 진행이 바뀜. */

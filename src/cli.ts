@@ -3,9 +3,11 @@
 // 사용법: node src/cli.ts <단계> ...
 //   targets                                   대상 목록
 //   check  [--target <대상>] <PR|커밋|기준..끝>   준비 확인만 (병합·main·pull·빌드·커밋 안 한 수정)
-//   plan   [--target <대상>] <PR|커밋|기준..끝>   읽기만. 준비 확인 → 반영 목록·운영 대조 → 확인 코드
+//   plan   [--target <대상>] <PR|커밋|기준..끝> [--backup]
+//                                             읽기만. 준비 확인 → 반영 목록·운영 대조 → 확인 코드
+//                                             --backup: 이어서 백업까지 (패널의 "반영 목록 만들기")
 //   backup <run>                              읽기만. 덮어쓸 운영 파일을 run/backup/ 에 받고 plan 때와 대조
-//   upload <run> --plan <코드> --yes           운영에 올림 (평소에는 패널 버튼으로. 패널을 못 쓸 때만)
+//   upload <run> --plan <코드> --yes           운영에 올리고 이어서 대조 (평소에는 패널 버튼으로. 패널을 못 쓸 때만)
 //   verify <run>                              읽기만. 운영 파일이 올린 로컬 파일과 같은지 대조
 //   rollback <run> --plan <코드> --yes         백업을 되올리고 새로 만든 파일은 지움
 //   runs   [--target <대상>]                   지난 run 목록
@@ -34,7 +36,7 @@ function parseArgs(argv: string[]): Args {
   const flags: Record<string, string | true> = {}
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--yes' || a === '--json') flags[a.slice(2)] = true
+    if (a === '--yes' || a === '--json' || a === '--backup') flags[a.slice(2)] = true
     else if (a.startsWith('--')) {
       const v = argv[i + 1]
       if (v === undefined || v.startsWith('--')) throw new Stop(`${a} 에 값이 필요함`)
@@ -137,10 +139,23 @@ async function main(): Promise<number> {
           w.finish(false, msg)
           return 1
         }
+        const withBackup = a.flags.backup === true
+        if (r.code && withBackup) {
+          say('')
+          await backup(r.run.id, {
+            by,
+            say: (s: string) => {
+              say(s)
+              w.line(s)
+            },
+            progress: (n: number, total: number) => w.progress(n, total)
+          })
+        }
         const v = viewRun(r.run)
         if (json) say(JSON.stringify(v))
         else say('\n' + renderRun(v))
-        w.finish(!!r.code, r.code ? `plan 완료: ${v.total}개, 확인 코드 ${r.code}` : v.errors.length ? `문제 ${v.errors.length}건` : '올릴 파일 없음')
+        const done = withBackup ? '반영 목록·백업 완료' : 'plan 완료'
+        w.finish(!!r.code, r.code ? `${done}: ${v.total}개, 확인 코드 ${r.code}` : v.errors.length ? `문제 ${v.errors.length}건` : '올릴 파일 없음')
         return r.code ? 0 : 1
       } catch (e) {
         w.finish(false, (e as Error).message)
@@ -169,8 +184,12 @@ async function main(): Promise<number> {
         else {
           const code = flag(a, 'plan') ?? ''
           const yes = a.flags.yes === true
-          if (step === 'upload') await upload(id, code, yes, hooks)
-          else await rollback(id, code, yes, hooks)
+          if (step === 'upload') {
+            await upload(id, code, yes, hooks)
+            // 올린 뒤 바로 대조한다(읽기만). 대조가 실패해도 업로드는 끝난 상태로 남는다.
+            hooks.say('')
+            await verify(id, hooks)
+          } else await rollback(id, code, yes, hooks)
         }
         w.finish(true, null)
         return 0
