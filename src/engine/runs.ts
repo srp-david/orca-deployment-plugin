@@ -1,7 +1,7 @@
 // run 기록. 폴더 형식은 bash deploy.sh 와 같다(meta.env, plan.tsv, targets.tsv, manual.tsv, skip.tsv,
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
 // pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
-// backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본).
+// backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김).
 import {
   appendFileSync,
   existsSync,
@@ -252,6 +252,19 @@ export function newRun(t: Target, id: string): Run {
   mkdirSync(dirname(indexFile(t.id)), { recursive: true })
   appendFileSync(indexFile(t.id), `${id}\t${dir.replace(/\\/g, '/')}\n`, 'utf8')
   return new Run(id, dir, t)
+}
+
+/** run 기록 화면에서 숨겼는가. 표시만의 문제다 — 안전 검사(나중 run, 되돌리기)는 숨긴 run 도 본다. */
+export function isHidden(run: Run): boolean {
+  return existsSync(run.path('hidden'))
+}
+
+/** run 기록 화면에서 숨기기/다시 보이기. 부분 업로드 run 은 숨기지 않는다(되돌려야 할 상태를 가리지 않게). */
+export function setHidden(run: Run, hidden: boolean): boolean {
+  if (hidden && run.status() === 'partial') return false
+  if (hidden) writeFileSync(run.path('hidden'), `${new Date().toISOString()}\n`)
+  else if (existsSync(run.path('hidden'))) unlinkSync(run.path('hidden'))
+  return true
 }
 
 /** 대상의 run 들(모든 위치), 최근 것부터. limit 은 화면용이다 — 안전 검사는 limit 없이 부른다. */

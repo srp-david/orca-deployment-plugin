@@ -193,3 +193,32 @@ test('초기화: 고른 PR·준비 확인·반영 목록을 비운다', async ()
   assert.equal(v.valueOf({ label: 'PR 번호 또는 커밋' }), '')
   await v.unmount()
 })
+
+test('run 기록: 목록 비우기는 숨기기만 하고, 숨긴 run 은 스위치로 다시 본다', async () => {
+  const hides: unknown[] = []
+  const run = (id: string, hidden: boolean) => ({
+    id, status: 'planned', statusLabel: 'plan됨', verifyFailed: false, total: 1, uploaded: 0, createdAt: Date.now(), subject: id, hidden
+  })
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'prs.recent': [],
+        'runs.list': [run('myapp-20261109-100000-aaaaaaa1', false), run('myapp-20261109-090000-aaaaaaa2', true)],
+        'runs.hide': (input: unknown) => {
+          hides.push(input)
+          return { count: 1, kept: 0 }
+        }
+      }
+    })
+  })
+  await v.settled()
+  await v.select({ label: '운영 반영' }, 'runs')
+  assert.ok(v.find({ text: '숨긴 run 보기 (1)' }) || v.find({ label: '숨긴 run 보기 (1)' }))
+  await v.press({ text: '목록 비우기' })
+  assert.deepEqual(hides, [{ target: 'myapp', hidden: true }])
+  assert.ok(v.find({ text: /1개 숨김/ }))
+  await v.unmount()
+})

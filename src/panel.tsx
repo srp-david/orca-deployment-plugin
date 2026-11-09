@@ -48,6 +48,7 @@ import type {
   TargetSummary,
   Workspace
 } from './protocol.ts'
+import { configVerdict } from './config-verdict.ts'
 
 // ── 상태 ──────────────────────────────────────────────────────
 
@@ -71,6 +72,9 @@ const pendingPlan = atom<string | null>(null)
 /** 대상 저장소 main 에 최근 병합된 PR. null 은 불러오는 중. */
 const prs = atom<RecentPr[] | null>(null)
 const prsError = atom<string | null>(null)
+/** run 기록 탭: 숨긴 run 도 보기, 숨기기 결과 안내. */
+const showHidden = atom(false)
+const runsNotice = atom<string | null>(null)
 
 // 대상 설정 편집
 const editing = atom<{ draft: Target; previousId: string | null; credUser: string | null; netrc: boolean } | null>(null)
@@ -150,6 +154,20 @@ async function loadRuns(): Promise<void> {
   if (list && read(targetId) === id) set(runs, list)
 }
 
+/** run 기록 화면에서 숨기기(보이는 run 모두) / 다시 보이기(모두). 파일과 안전 검사에는 그대로 남는다. */
+async function hideRuns(hidden: boolean): Promise<void> {
+  act()
+  const target = read(targetId)
+  if (!target) return
+  const r = await ask(() => plugin.request('runs.hide', { target, hidden }))
+  if (!r) return
+  set(runsNotice, hidden
+    ? `${r.count}개 숨김${r.kept ? ` · 부분 업로드 run ${r.kept}개는 되돌려야 해서 남김` : ''} — 파일과 되돌리기 정보는 그대로 있음`
+    : `${r.count}개 다시 보임`)
+  if (!hidden) set(showHidden, false)
+  await loadRuns()
+}
+
 async function loadRun(id: string): Promise<void> {
   const d = await ask(() => plugin.request('run.get', { id }))
   if (d && read(runId) === id) set(detail, d)
@@ -165,6 +183,8 @@ function chooseTarget(id: string, force = false): void {
   set(runs, [])
   set(pendingPlan, null)
   set(spec, '')
+  set(runsNotice, null)
+  set(showHidden, false)
   void loadRuns()
   void loadPrs()
 }
@@ -365,7 +385,7 @@ async function startConfigCheck(): Promise<void> {
   const e = read(editing)
   if (!e?.previousId || !e.draft.checkCommit) return
   const target = e.previousId
-  const r = await ask(() => plugin.request('job.start', { step: 'plan', target, spec: e.draft.checkCommit! }))
+  const r = await ask(() => plugin.request('job.start', { step: 'plan', target, spec: e.draft.checkCommit!, purpose: 'configCheck' }))
   if (r) set(configCheck, { jobId: r.jobId, target, result: null, ok: null })
 }
 
@@ -377,17 +397,7 @@ async function finishConfigCheck(job: Job): Promise<void> {
   }
   const d = await ask(() => plugin.request('run.get', { id: job.run! }))
   if (!d) return
-  const v = d.view
-  const done = v.errors.filter((x) => /이미 반영됨/.test(x)).length
-  const other = v.errors.filter((x) => !/이미 반영됨|main 에 이후 변경/.test(x))
-  const fresh = v.rows.filter((r) => r.kind === 'A')
-  const ok = done > 0 && other.length === 0 && fresh.length === 0
-  const lines = [
-    ok ? `맞음: ${done}개 파일이 운영에 이미 반영돼 있음` : '설정을 다시 보세요',
-    ...other.map((x) => `· ${x}`),
-    ...fresh.map((r) => `· 운영에 없는 경로(매핑 확인): ${r.remote}`)
-  ]
-  if (!done && !other.length && !fresh.length) lines.push('· 이미 반영된 파일을 하나도 찾지 못함')
+  const { ok, lines } = configVerdict(d.view)
   set(configCheck, { jobId: job.id, target: job.target, ok, result: lines.join('\n') })
 }
 
@@ -647,7 +657,8 @@ function RunCard() {
   const id = read(runId)
   if (!t) return null
   const job = activeJob(t.id)
-  const planJob = job && job.step === 'plan' ? job : null
+  // 설정 확인으로 띄운 plan 은 대상 설정 탭에서 보여 준다.
+  const planJob = job && job.step === 'plan' && job.id !== read(configCheck)?.jobId ? job : null
   if (!id && !planJob) return null
   if (!d) return planJob ? <JobProgress job={planJob} /> : <Spinner label="run 불러오는 중" />
   const v = d.view
@@ -854,21 +865,44 @@ function DeployTab() {
 
 function RunsTab() {
   const t = currentTarget()
-  const list = read(runs)
+  const all = read(runs)
   const d = read(detail)
   if (!t) return <EmptyState title="대상을 고르세요" />
+  const hiddenCount = all.filter((r) => r.hidden).length
+  const showing = read(showHidden)
+  const list = showing ? all : all.filter((r) => !r.hidden)
   return (
     <Stack gap="sm">
       <Row justify="between">
         <Text weight="medium">{`${t.label} run 기록`}</Text>
-        <Button icon="refresh" variant="ghost" size="sm" onPress={loadRuns}>
-          새로 고침
-        </Button>
+        <Row gap="xs">
+          <Button icon="close" variant="ghost" size="sm" disabled={!all.some((r) => !r.hidden)} onPress={() => hideRuns(true)}>
+            목록 비우기
+          </Button>
+          <Button icon="refresh" variant="ghost" size="sm" onPress={loadRuns}>
+            새로 고침
+          </Button>
+        </Row>
       </Row>
+      {hiddenCount > 0 && (
+        <Row justify="between" align="center">
+          <Switch label={`숨긴 run 보기 (${hiddenCount})`} checked={showing} onChange={(v) => set(showHidden, v)} />
+          {showing && (
+            <Button variant="ghost" size="sm" onPress={() => hideRuns(false)}>
+              모두 다시 보이기
+            </Button>
+          )}
+        </Row>
+      )}
+      {read(runsNotice) && (
+        <Text size="xs" muted>
+          {read(runsNotice)!}
+        </Text>
+      )}
       <Table
         label="run 기록"
         maxHeight="md"
-        emptyText="run 없음"
+        emptyText={hiddenCount ? '보이는 run 없음 (숨긴 run 은 위에서 볼 수 있음)' : 'run 없음'}
         selectionMode="single"
         selected={read(runId) ? [read(runId)!] : []}
         onSelectionChange={({ keys }) => keys[0] && openRun(keys[0])}
@@ -886,7 +920,7 @@ function RunsTab() {
           key: r.id,
           cells: {
             at: { type: 'relative', at: r.createdAt, format: 'short' },
-            status: r.statusLabel + (r.status === 'partial' ? ` ${r.uploaded}/${r.total}` : '') + (r.verifyFailed ? ' · 대조 실패' : ''),
+            status: r.statusLabel + (r.status === 'partial' ? ` ${r.uploaded}/${r.total}` : '') + (r.verifyFailed ? ' · 대조 실패' : '') + (r.hidden ? ' · 숨김' : ''),
             files: r.total,
             subject: r.subject || r.id
           }

@@ -10,7 +10,7 @@ import { credentialUser, deleteCredential, writeCredential } from './engine/cred
 import { mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
-import { clearStaleLock, listRuns, openRun } from './engine/runs.ts'
+import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
 import {
   deleteTarget,
   detectTarget,
@@ -24,6 +24,7 @@ import {
 } from './engine/target.ts'
 import { Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
+import { configVerdict } from './config-verdict.ts'
 import { openPanel } from './open-panel.ts'
 import type { RecentPr, RunSummary, TargetSummary, Workspace } from './protocol.ts'
 
@@ -106,6 +107,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   const watched = new Map<string, string>()
   /** 이 워커가 띄운 CLI 의 프로세스 번호(작업 id → pid). */
   const spawned = new Map<string, number>()
+  /** "설정 확인"으로 띄운 plan 작업 id. 끝나면 설정 판정으로 알린다. */
+  const configChecks = new Set<string>()
   const running = (pid: number | undefined) => {
     if (!pid) return false
     try {
@@ -117,22 +120,40 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
   let timer: ReturnType<typeof setInterval> | null = null
 
+  /** 작업 이름. "설정 확인"으로 띄운 plan 은 설정 확인이라 부른다. */
+  const labelOf = (job: Job) => (configChecks.has(job.id) ? '설정 확인' : LABEL[job.step])
+
+  /** 끝난 작업을 사람에게 알릴 말. 설정 확인은 plan 이 "문제"(이미 반영됨)로 끝나는 것이 정상이라 따로 판정한다. */
+  function ending(job: Job): { text: string; ok: boolean; body: string | null } {
+    if (configChecks.has(job.id)) {
+      if (!job.run) return { text: `${job.target} 설정 확인 실패`, ok: false, body: job.message }
+      try {
+        const v = configVerdict(viewRun(openRun(job.run)))
+        return { text: `${job.target} ${v.ok ? '설정 맞음' : '설정 확인 필요'}`, ok: v.ok, body: v.lines.join('\n') }
+      } catch (e) {
+        return { text: `${job.target} 설정 확인 실패`, ok: false, body: (e as Error).message }
+      }
+    }
+    const ok = job.state === 'done'
+    return { text: `${job.target} ${LABEL[job.step]} ${ok ? '끝' : '실패'}`, ok, body: job.message }
+  }
+
   async function status(job: Job | null): Promise<void> {
     try {
       if (!job || job.state === 'done' || job.state === 'failed') {
-        const text = job ? `${job.target} ${LABEL[job.step]} ${job.state === 'done' ? '끝' : '실패'}` : '운영 반영'
+        const end = job ? ending(job) : null
         await orca.host.call('statusBar.update', {
           id: 'deploy',
-          text,
-          icon: job?.state === 'failed' ? 'warning' : 'rocket',
-          tone: job?.state === 'failed' ? 'danger' : 'neutral'
+          text: end?.text ?? '운영 반영',
+          icon: end && !end.ok ? 'warning' : 'rocket',
+          tone: end && !end.ok ? 'danger' : 'neutral'
         })
         return
       }
       const p = job.progress ? ` ${job.progress.n}/${job.progress.total}` : ''
       await orca.host.call('statusBar.update', {
         id: 'deploy',
-        text: `${job.target} ${LABEL[job.step]}${p}`,
+        text: `${job.target} ${labelOf(job)}${p}`,
         icon: 'upload',
         tone: job.step === 'upload' || job.step === 'rollback' ? 'warning' : 'accent'
       })
@@ -160,10 +181,12 @@ export default function activate(orca: OrcaWorkerApi): void {
         if (job.state === 'done' || job.state === 'failed') {
           watched.delete(id)
           spawned.delete(id)
+          const end = ending(job)
+          configChecks.delete(id)
           void orca.host
             .call('notifications.show', {
-              title: `운영 반영: ${job.target} ${LABEL[job.step]} ${job.state === 'done' ? '끝' : '실패'}`,
-              ...(job.message ? { body: job.message } : {})
+              title: `운영 반영: ${end.text}`,
+              ...(end.body ? { body: end.body } : {})
             })
             .catch(() => {})
         }
@@ -278,7 +301,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   )
 
-  orca.panels.handle('job.start', ({ step, target, spec, run, code, backup }) =>
+  orca.panels.handle('job.start', ({ step, target, spec, run, code, backup, purpose }) =>
     guard(() => {
       const t = loadTarget(target)
       if (!existsSync(CLI)) throw new Stop(`CLI 를 찾지 못함: ${CLI}`)
@@ -331,6 +354,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (child.pid) spawned.set(id, child.pid)
       child.unref()
       orca.log(`job ${id}: ${args.join(' ').replace(/--plan \S+/, '--plan ********')}`)
+      if (purpose === 'configCheck' && step === 'plan') configChecks.add(id)
       watch(id)
       orca.panels.post('job.changed', job)
       void status(job)
@@ -354,10 +378,24 @@ export default function activate(orca: OrcaWorkerApi): void {
           total: v.total,
           uploaded: v.uploaded,
           createdAt: v.createdAt,
-          subject: v.subject
+          subject: v.subject,
+          hidden: isHidden(r)
         }
       })
     )
+  )
+
+  orca.panels.handle('runs.hide', ({ target, hidden }) =>
+    guard(() => {
+      let count = 0
+      let kept = 0
+      for (const r of listRuns(loadTarget(target))) {
+        if (isHidden(r) === hidden) continue
+        if (setHidden(r, hidden)) count++
+        else kept++
+      }
+      return { count, kept }
+    })
   )
 
   orca.panels.handle('lock.clear', ({ target }) => guard(() => ({ message: clearStaleLock(target) })))

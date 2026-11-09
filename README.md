@@ -312,6 +312,8 @@ run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 �
 
 확인 코드 = `sha256(대상 이름 + "\n" + plan.tsv)` 의 앞 8자리.
 
+**run 기록 정리**: run 기록 탭의 **목록 비우기**는 run 을 지우지 않고 화면에서만 숨깁니다(run 폴더에 `hidden` 표시). 업로드한 run 의 백업과 기록은 되돌리기와 "같은 파일을 건드린 나중 반영" 확인에 쓰이므로 지우지 않습니다. 부분 업로드 run 은 되돌려야 하는 상태라 숨기지 않습니다. **숨긴 run 보기**로 다시 보고 **모두 다시 보이기**로 되돌립니다.
+
 ## 9. 제한과 주의
 
 - **여러 PC 에서 같은 서버에 동시에 반영하는 경우를 막지 못합니다.** 잠금과 run 기록이 PC 마다 따로입니다. 업로드 직전·되돌리기 전에 운영 파일을 다시 대조하므로 대부분의 충돌은 잡히지만, 같은 대상에 반영하는 사람끼리 미리 맞추세요.
@@ -346,7 +348,7 @@ test/         엔진 단위·안전 시험, e2e, 시험 FTP 서버
 시험:
 
 ```powershell
-node --test test/engine.spec.ts test/safety.spec.ts test/guard-hook.spec.ts   # 엔진 단위·안전 회귀·스킬 훅
+node --test test/*.spec.ts   # 엔진 단위·안전 회귀·스킬 훅·패널 열기·설정 확인 판정
 orca plugin test .                                    # 패널·워커
 orca plugin check .                                   # 패널을 워커와 함께 한 번 그리기
 node test/e2e.ts                                      # 임시 저장소 + 시험 FTP 로 전체 흐름
