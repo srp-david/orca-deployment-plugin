@@ -100,6 +100,14 @@ test('백업 뒤 업로드를 누르면 그 run 과 확인 코드로 업로드�
   await v.unmount()
 })
 
+test('Backup 요청에는 undefined 칸이 없다 — Orca 가 "input: Invalid input" 으로 거절함', async () => {
+  const { v, started } = await planned('planned')
+  await v.press({ text: /Backup$/ })
+  assert.deepEqual(started[1], { step: 'backup', target: 'myapp', run: 'myapp-20261106-180000-abcdef12' })
+  assert.ok(!Object.values(started[1] as object).includes(undefined))
+  await v.unmount()
+})
+
 test('작업공간으로 못 정하면 시험용 대상은 자동으로 고르지 않는다 (리뷰 #10)', async () => {
   const v = await mount(panel, {
     host: mockHost({

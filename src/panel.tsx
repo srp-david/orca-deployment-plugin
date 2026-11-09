@@ -100,6 +100,12 @@ async function ask<T>(body: () => Promise<T>): Promise<T | null> {
   }
 }
 
+/** 워커로 보내는 값에서 undefined 칸을 뺀다. Orca 는 JSON 이 아닌 값이 섞인 요청을
+ *  "input: Invalid input" 으로 거절한다. */
+function plain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
+
 /** 사람이 동작을 시작할 때: 지난 오류 띠를 지운다. */
 function act(): void {
   set(error, null)
@@ -193,7 +199,7 @@ async function runCheck(): Promise<void> {
 
 async function start(step: JobStep, extra: { spec?: string; run?: string; code?: string }): Promise<string | null> {
   const target = read(targetId)
-  const r = await ask(() => plugin.request('job.start', { step, target, ...extra }))
+  const r = await ask(() => plugin.request('job.start', plain({ step, target, ...extra })))
   return r?.jobId ?? null
 }
 
@@ -274,7 +280,7 @@ async function saveEdit(): Promise<void> {
   act()
   const e = read(editing)
   if (!e) return
-  const r = await ask(() => plugin.request('target.save', { target: e.draft, previousId: e.previousId }))
+  const r = await ask(() => plugin.request('target.save', plain({ target: e.draft, previousId: e.previousId })))
   if (!r) return
   set(editErrors, r.errors)
   if (r.errors.length) return
