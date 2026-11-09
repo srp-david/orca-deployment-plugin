@@ -26,3 +26,12 @@ test('운영에만 있는 수정·운영에 없는 경로·이미 반영된 파�
   assert.equal(none.ok, false)
   assert.ok(none.lines.some((l) => l.includes('하나도 찾지 못함')))
 })
+
+test('다른 문제 문장 안에 "이미 반영됨" 낱말이 있어도 맞음으로 보지 않는다', () => {
+  const v = configVerdict({
+    errors: ['상수 값이 바뀜: com.x.Foo.MSG ("이미 반영됨" → "main 에 이후 변경") — 이 상수를 쓰는 class 는 ... 반영 목록에 없음: src/Bar.java'],
+    rows: []
+  })
+  assert.equal(v.ok, false)
+  assert.ok(v.lines.some((l) => l.includes('상수 값이 바뀜')))
+})

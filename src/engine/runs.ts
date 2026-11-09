@@ -1,7 +1,8 @@
 // run 기록. 폴더 형식은 bash deploy.sh 와 같다(meta.env, plan.tsv, targets.tsv, manual.tsv, skip.tsv,
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
 // pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
-// backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김).
+// backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김),
+// warnings.txt(사람이 판단할 경고), warnings.ack(경고를 확인한 사람·시각).
 import {
   appendFileSync,
   existsSync,
@@ -118,6 +119,19 @@ export class Run {
       .filter((l) => l !== '')
     if (!this.planComplete()) list.push('plan 이 끝나지 않음(중단됐거나 아직 도는 중) — 새로 plan')
     return list
+  }
+
+  /** 사람이 보고 판단해야 하는 경고들. 막지는 않지만, 확인 표시(warnings.ack)가 있어야 올린다. */
+  warnings(): string[] {
+    return this.text('warnings.txt')
+      .split('\n')
+      .filter((l) => l !== '')
+  }
+
+  /** 지금 경고 내용 그대로를 사람이 확인했는가. */
+  warningsAcked(): boolean {
+    const [, , sha] = this.text('warnings.ack').trim().split('\t')
+    return !!sha && sha === sha256(this.text('warnings.txt'))
   }
 
   /** 확인 코드 = sha256(대상 + "\n" + plan.tsv) 앞 8자리 (bash 와 같다). */
@@ -260,6 +274,20 @@ export function isHidden(run: Run): boolean {
 }
 
 /** run 기록 화면에서 숨기기/다시 보이기. 부분 업로드 run 은 숨기지 않는다(되돌려야 할 상태를 가리지 않게). */
+/**
+ * run 의 경고를 사람이 보고 확인했다고 남긴다(누가·언제·어떤 경고). 올리기 전의 run 에만.
+ * IntelliJ 처럼 판단을 사람에게 맡기되, 확인 없이 지나가지는 않게 한다.
+ */
+export function ackWarnings(run: Run, by: string): string {
+  const list = run.warnings()
+  if (!list.length) throw new Stop('확인할 경고가 없음')
+  const status = run.status()
+  if (status !== 'planned' && status !== 'backedUp') throw new Stop(`올리기 전의 run 만 확인할 수 있음 (지금 ${STATUS_LABEL[status]})`)
+  run.write('warnings.ack', `${new Date().toISOString()}\t${by.replace(/\s+/g, ' ')}\t${sha256(run.text('warnings.txt'))}\n`)
+  run.log(`경고 ${list.length}건 확인함 (${by})`)
+  return `경고 ${list.length}건 확인함 — 업로드할 수 있음`
+}
+
 export function setHidden(run: Run, hidden: boolean): boolean {
   if (hidden && run.status() === 'partial') return false
   if (hidden) writeFileSync(run.path('hidden'), `${new Date().toISOString()}\n`)

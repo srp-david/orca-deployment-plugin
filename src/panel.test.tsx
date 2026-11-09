@@ -7,7 +7,7 @@ const targets = [
   { id: 'test', label: '시험', host: '127.0.0.1', port: 2121, root: '/app', repo: 'C:/work/repos/my-app', test: true }
 ]
 
-function view(status: string) {
+function view(status: string, extra: Record<string, unknown> = {}) {
   return {
     id: 'myapp-20261106-180000-abcdef12',
     target: 'myapp',
@@ -31,6 +31,8 @@ function view(status: string) {
     skip: [],
     notes: [],
     errors: [],
+    warnings: [],
+    warningsAcked: false,
     code: 'abcdef12',
     hasClass: true,
     uploaded: 0,
@@ -39,11 +41,12 @@ function view(status: string) {
     busy: null,
     configChanged: false,
     staleLock: null,
-    port: 21
+    port: 21,
+    ...extra
   }
 }
 
-function host(status: string, started: unknown[]) {
+function host(status: string, started: unknown[], extra: Record<string, unknown> = {}) {
   return mockHost({
     requests: {
       'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
@@ -59,14 +62,18 @@ function host(status: string, started: unknown[]) {
         started.push(input)
         return { jobId: 'j1' }
       },
-      'run.get': { view: view(status), log: [] }
+      'run.get': { view: view(status, extra), log: [] },
+      'run.ack': (input: unknown) => {
+        started.push({ ack: input })
+        return { message: 'ok' }
+      }
     }
   })
 }
 
-async function planned(status: string) {
+async function planned(status: string, extra: Record<string, unknown> = {}) {
   const started: unknown[] = []
-  const v = await mount(panel, { host: host(status, started) })
+  const v = await mount(panel, { host: host(status, started, extra) })
   await v.settled()
   await v.press({ label: '#123 PR 123' })
   await v.press({ text: '반영 목록 만들기' })
@@ -221,4 +228,18 @@ test('run 기록: 목록 비우기는 숨기기만 하고, 숨긴 run 은 스위
   assert.deepEqual(hides, [{ target: 'myapp', hidden: true }])
   assert.ok(v.find({ text: /1개 숨김/ }))
   await v.unmount()
+})
+
+test('경고가 있으면 "확인함" 전에는 업로드가 꺼지고, 확인함을 누르면 그 run 으로 확인 요청', async () => {
+  const w = ['상수 값이 바뀜: com.x.Foo.LIMIT (1 → 2) — 이 이름이 나오는 소스가 반영 목록에 없음: src/Bar.java']
+  const { v, started } = await planned('backedUp', { warnings: w })
+  assert.ok(v.find({ text: /경고 1건/ }))
+  assert.equal(v.find({ text: /My App에 2개 업로드$/ })!.disabled, true)
+  await v.press({ text: '확인함' })
+  assert.deepEqual(started.at(-1), { ack: { id: 'myapp-20261106-180000-abcdef12' } })
+  await v.unmount()
+  const acked = await planned('backedUp', { warnings: w, warningsAcked: true })
+  assert.equal(acked.v.find({ text: /My App에 2개 업로드$/ })!.disabled, false)
+  assert.equal(acked.v.find({ text: '확인함' }), null)
+  await acked.v.unmount()
 })

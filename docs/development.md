@@ -5,7 +5,7 @@
 ![운영 반영 구조: 패널이 워커에 요청하고, 워커와 Claude 스킬이 띄운 CLI 프로세스가 엔진으로 메인 체크아웃·운영 FTP·자격 증명 관리자를 다루며, 진행은 run·작업 기록으로 워커가 읽는다](diagrams/architecture.png)
 
 ```
-src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 작업 기록
+src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 작업 기록, class 파일 상수 읽기(classfile.ts)
 src/cli.ts           CLI. 스킬과 워커가 같은 엔진을 이 명령으로 부름
 src/worker.ts        플러그인 워커. 짧은 일은 엔진을 직접, 운영 FTP 단계는 CLI 프로세스를 따로 띄움(ADR 0002)
 src/panel.tsx        패널(Orca components)
@@ -62,7 +62,7 @@ node test/seed-test-ftp.ts <커밋>     # 시험 FTP 루트를 그 커밋의 직
 | run 위치 색인 | `~/.prod-deploy/run-index/` (run 기록 폴더를 바꿔도 예전 run 을 찾음) |
 | 잠금·작업 진행 | `~/.prod-deploy/locks/`, `~/.prod-deploy/jobs/` |
 
-run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김).
+run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `warnings.txt`(경고)·`warnings.ack`(경고를 확인한 사람·시각·경고 해시), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김).
 
 확인 코드 = `sha256(대상 이름 + "\n" + plan.tsv)` 의 앞 8자리. run 폴더 형식과 확인 코드는 예전 bash 도구와 같아서, 그때 만든 run 도 읽고 되돌릴 수 있습니다(ADR 0001).
 

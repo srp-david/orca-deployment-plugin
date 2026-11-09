@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, uti
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { makeClass, type FixField } from './class-fixture.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLI = join(ROOT, 'src', 'cli.ts')
@@ -44,10 +45,11 @@ function write(path: string, text: string | Buffer): void {
   writeFileSync(path, text)
 }
 
-/** major 52 인 가짜 class 파일. */
-function classBytes(tag: string): Buffer {
-  return Buffer.concat([Buffer.from([0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52]), Buffer.from(tag)])
+/** major 52 인 시험용 class 파일. tag 로 어느 파일인지 구분한다. */
+function classBytes(tag: string, name = 'com/x/Foo', fields: FixField[] = []): Buffer {
+  return makeClass(name, fields, tag)
 }
+const hasTag = (p: string, tag: string) => ftpText(p)?.includes(tag) ?? false
 
 function cli(...args: string[]): { code: number; out: string } {
   const r = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, env, encoding: 'utf8' })
@@ -105,8 +107,8 @@ async function main(): Promise<void> {
   // 빌드: 바깥·익명 class 는 소스보다 새것, 옛 내부 class 는 소스보다 오래된 찌꺼기
   const now = Date.now() / 1000
   write(`${repo}/${C}/Foo.class`, classBytes('foo-tip'))
-  write(`${repo}/${C}/Foo$1.class`, classBytes('foo-anon'))
-  write(`${repo}/${C}/Foo$Old.class`, classBytes('foo-old'))
+  write(`${repo}/${C}/Foo$1.class`, makeClass('com/x/Foo$1', [], 'foo-anon', { sourceFile: 'Foo.java' }))
+  write(`${repo}/${C}/Foo$Old.class`, makeClass('com/x/Foo$Old', [], 'foo-old', { sourceFile: 'Foo.java' }))
   utimesSync(`${repo}/src/main/java/com/x/Foo.java`, now - 60, now - 60)
   utimesSync(`${repo}/${C}/Foo$Old.class`, now - 3600, now - 3600)
 
@@ -173,7 +175,7 @@ async function scenarios(tip1: string): Promise<void> {
     assert.match(r.out, /덮어씀\tbuild\/classes\/java\/main\/com\/x\/Foo\.class\t→ \/app\/WEB-INF\/classes\/com\/x\/Foo\.class/)
     assert.match(r.out, /새파일\tbuild\/classes\/java\/main\/com\/x\/Foo\$1\.class/)
     assert.doesNotMatch(r.out, /(덮어씀|새파일)\t.*Foo\$Old/)
-    assert.match(r.out, /옛 내부 클래스[\s\S]*Foo\$Old\.class/)
+    assert.match(r.out, /Foo\$Old\.class  — 빌드 폴더의 옛 내부 클래스/)
     assert.match(r.out, /web\.xml  — 운영 서버가 별도 파일을 씀/)
     assert.match(r.out, /b\.js  — 삭제된 파일/)
     assert.match(r.out, /매핑 밖 파일 ==\nREADME\.md/)
@@ -223,7 +225,7 @@ async function scenarios(tip1: string): Promise<void> {
     assert.equal(ftpText('ui/c.html'), '<p>new</p>\n')
     assert.equal(ftpText('ui/b.js'), 'var b = 1\n', '지운 파일은 운영에서 지우지 않음')
     assert.equal(ftpText('WEB-INF/web.xml'), '<web prod/>\n', '손 처리 파일은 올리지 않음')
-    assert.equal(ftpText('WEB-INF/classes/com/x/Foo$1.class')?.slice(8), 'foo-anon')
+    assert.ok(hasTag('WEB-INF/classes/com/x/Foo$1.class', 'foo-anon'))
     assert.equal(existsSync(ftpFile('WEB-INF/classes/com/x/Foo$Old.class')), false)
     assert.equal(existsSync(ftpFile('ui/a.xml.uploading')), false)
   })
@@ -254,7 +256,7 @@ async function scenarios(tip1: string): Promise<void> {
     assert.equal(ftpText('new-files.txt'), 'base list\n')
     assert.equal(existsSync(ftpFile('ui/c.html')), false)
     assert.equal(existsSync(ftpFile('WEB-INF/classes/com/x/Foo$1.class')), false)
-    assert.equal(ftpText('WEB-INF/classes/com/x/Foo.class')?.slice(8), 'foo-base')
+    assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-base'))
   })
 
   await step('되돌린 run 은 다시 올리지 않음', () => {
@@ -446,6 +448,124 @@ async function scenarios(tip1: string): Promise<void> {
     assert.equal(cli('rollback', r, '--plan', c, '--yes').code, 0)
     assert.equal(existsSync(ftpFile('newdir/e.html')), false)
     assert.equal(existsSync(ftpFile('ui/d.html')), false)
+  })
+
+  // src/main/java 아래 .java 가 아닌 파일(메일 템플릿 등): 빌드가 WEB-INF/classes 에 넣는다.
+  write(`${repo}/src/main/java/com/x/mail.txt`, 'hello\n')
+  gitc('add', '-A')
+  gitc('commit', '-q', '-m', 'tip4: 템플릿')
+  gitc('push', '-q')
+  const tip4 = gitc('rev-parse', 'HEAD')
+
+  await step('src/main 아래 매핑 밖 파일은 막힘, 매핑을 넣으면 올라감', () => {
+    const blocked = cli('plan', '--target', 'fx', tip4)
+    assert.equal(blocked.code, 1)
+    assert.match(blocked.out, /경로 매핑·손 처리 규칙이 없음: src\/main\/java\/com\/x\/mail\.txt/)
+    const f = `${HOME}/targets/fx.json`
+    const before = readFileSync(f, 'utf8')
+    const t = JSON.parse(before)
+    t.mappings.push({ local: 'src/main/java', remote: '/WEB-INF/classes' })
+    writeFileSync(f, JSON.stringify(t))
+    const ok = cli('plan', '--target', 'fx', tip4)
+    writeFileSync(f, before)
+    assert.equal(ok.code, 0, ok.out)
+    assert.match(ok.out, /새파일\tsrc\/main\/java\/com\/x\/mail\.txt\t→ \/app\/WEB-INF\/classes\/com\/x\/mail\.txt/)
+  })
+
+  // 상수: Bar 는 Foo.LIMIT 로, User 는 Foo 를 상속한 Mid 를 상속해서 그냥 LIMIT 로 쓴다(소스에 Foo 가 없음).
+  // 이 셋을 먼저 넣고, 다음 커밋에서 Foo 의 상수 값만 바꾼다. Foo.java 에는 다른 최상위 class FooHelper 도 있다.
+  const J = `${repo}/src/main/java/com/x`
+  write(`${J}/Bar.java`, 'class Bar { int x = Foo.LIMIT; }\n')
+  write(`${J}/Mid.java`, 'class Mid extends Foo {}\n')
+  write(`${J}/User.java`, 'class User extends Mid { int n = LIMIT; }\n')
+  // 식을 거쳐 부름: 소스에 Foo 도, Foo 를 상속한 이름도 없다
+  write(`${J}/Other.java`, 'class Other { int n = Registry.get().LIMIT; }\n')
+  gitc('add', '-A')
+  gitc('commit', '-q', '-m', 'tip5a: Bar, Mid, User, Other')
+  const tip5a = gitc('rev-parse', 'HEAD')
+  write(`${J}/Foo.java`, 'class Foo { public static final int LIMIT = 2; }\nclass FooHelper {}\n')
+  gitc('commit', '-q', '-am', 'tip5: Foo.LIMIT = 2')
+  gitc('push', '-q')
+  const tip5 = gitc('rev-parse', 'HEAD')
+  const src = (f: string) => ({ sourceFile: f })
+  write(`${repo}/${C}/Foo.class`, makeClass('com/x/Foo', [{ name: 'LIMIT', desc: 'I', value: 2 }], 'foo-limit2', src('Foo.java')))
+  write(`${repo}/${C}/FooHelper.class`, makeClass('com/x/FooHelper', [], 'foo-helper', src('Foo.java')))
+  write(`${repo}/${C}/Bar.class`, makeClass('com/x/Bar', [], 'bar', src('Bar.java')))
+  write(`${repo}/${C}/Mid.class`, makeClass('com/x/Mid', [], 'mid', { superName: 'com/x/Foo', sourceFile: 'Mid.java' }))
+  write(`${repo}/${C}/User.class`, makeClass('com/x/User', [], 'user', { superName: 'com/x/Mid', sourceFile: 'User.java' }))
+  write(`${repo}/${C}/Other.class`, makeClass('com/x/Other', [], 'other', src('Other.java')))
+  write(ftpFile('WEB-INF/classes/com/x/Foo.class'), classBytes('foo-limit1', 'com/x/Foo', [{ name: 'LIMIT', desc: 'I', value: 1 }]))
+
+  await step('상수 값이 바뀌었는데 이름이 나오는 소스(직접·상속·식)가 반영 목록에 없으면 경고', () => {
+    const r = cli('plan', '--target', 'fx', tip5)
+    assert.equal(r.code, 0, r.out)
+    assert.match(r.out, /== 경고 1건 \(사람이 보고 확인해야 올림: ack /)
+    const line = /상수 값이 바뀜: com\.x\.Foo\.LIMIT \(1 → 2\) — 이 이름이 나오는 소스가 반영 목록에 없음: (.*?) — /.exec(r.out)
+    assert.ok(line, r.out)
+    assert.deepEqual(line[1].split(', ').sort(), [
+      'src/main/java/com/x/Bar.java',
+      'src/main/java/com/x/Other.java',
+      'src/main/java/com/x/User.java'
+    ])
+    assert.match(r.out, /확인 코드:/)
+  })
+
+  await step('같은 .java 의 다른 최상위 class 도 반영 목록에 들어감, 출처를 모르는 class 는 막힘', () => {
+    const r = cli('plan', '--target', 'fx', tip5)
+    assert.match(r.out, /새파일\tbuild\/classes\/java\/main\/com\/x\/FooHelper\.class/)
+    write(`${repo}/${C}/Stray.class`, makeClass('com/x/Stray', [], 'stray'))
+    const stray = cli('plan', '--target', 'fx', tip5)
+    rmSync(`${repo}/${C}/Stray.class`)
+    assert.match(stray.out, /소스 파일 이름\(SourceFile\)이 없음[^\n]*Stray\.class/)
+  })
+
+  await step('상수를 쓰는 class 도 반영 목록에 있으면 통과', () => {
+    const r = cli('plan', '--target', 'fx', `${tip5a}^..${tip5}`)
+    assert.equal(r.code, 0, r.out)
+    assert.match(r.out, /새파일\tbuild\/classes\/java\/main\/com\/x\/Bar\.class/)
+    assert.match(r.out, /새파일\tbuild\/classes\/java\/main\/com\/x\/User\.class/)
+    assert.match(r.out, /새파일\tbuild\/classes\/java\/main\/com\/x\/Other\.class/)
+    assert.match(r.out, /상수 LIMIT 값이 바뀜 \(1 → 2\)/)
+    assert.doesNotMatch(r.out, /== 경고/)
+  })
+
+  await step('경고가 있는 run 은 사람이 확인(ack)해야 올라감', () => {
+    const p = cli('plan', '--target', 'fx', tip5)
+    const r = runOf(p.out)
+    const c = codeOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    const blocked = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(blocked.code, 1)
+    assert.match(blocked.out, /경고 1건을 사람이 확인해야 올림/)
+    assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit1'), '아무것도 올라가지 않음')
+    const ack = cli('ack', r, '--by', 'e2e')
+    assert.equal(ack.code, 0, ack.out)
+    assert.match(cli('show', r).out, /== 경고 1건 \(확인함\) ==/)
+    assert.match(readFileSync(`${tmp}/runs/${r}/warnings.ack`, 'utf8'), /\te2e\t/)
+    const up = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(up.code, 0, up.out)
+    assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit2'))
+    // 경고 내용이 확인 뒤 바뀌면 확인은 무효(여기서는 되돌리기 전에 상태만 본다)
+    writeFileSync(`${tmp}/runs/${r}/warnings.txt`, readFileSync(`${tmp}/runs/${r}/warnings.txt`, 'utf8') + 'x\n')
+    assert.match(cli('show', r).out, /== 경고 2건 \(사람이 보고 확인해야 올림/)
+    assert.equal(cli('ack', r).code, 1, '올린 run 은 확인할 수 없음')
+    assert.equal(cli('rollback', r, '--plan', c, '--yes').code, 0)
+    assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit1'))
+  })
+
+  // src/main 아래 매핑 밖 파일을 지움
+  write(`${repo}/src/main/extra/x.txt`, 'x\n')
+  gitc('add', '-A')
+  gitc('commit', '-q', '-m', 'tip6a: extra')
+  rmSync(`${repo}/src/main/extra/x.txt`)
+  gitc('commit', '-q', '-am', 'tip6: extra 지움')
+  gitc('push', '-q')
+  const tip6 = gitc('rev-parse', 'HEAD')
+
+  await step('src/main 아래 매핑 밖 파일을 지우면 손 처리로 남김', () => {
+    const r = cli('plan', '--target', 'fx', tip6)
+    assert.match(r.out, /src\/main\/extra\/x\.txt  — 삭제된 파일/)
+    assert.doesNotMatch(r.out, /== 매핑 밖 파일 ==\nsrc\/main\/extra/)
   })
 
   await step('반영 커밋 뒤에 pull 이 안 됐으면 막힘', () => {

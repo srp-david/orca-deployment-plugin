@@ -5,6 +5,7 @@
   ["ask", "node \"C:/x/src/cli.ts\" \"upload\" gg-1 --plan f --yes"],
   ["ask", "printf \"u\\np\" | node src/cli.ts creds gg set"],
   ["ask", "node src/cli.ts creds gg"],
+  ["ask", "node \"C:/x/src/cli.ts\" ack gg-20261109-1-abc --by claude"],
   ["ask", "bash ~/.claude/skills/prod-deploy/scripts/deploy.sh upload run --plan x --yes"],
   ["ask", "bash \"C:/x/deploy.sh\" rollback run --plan x --yes"],
   ["pass", "node src/cli.ts plan --target gg \"#160\""],

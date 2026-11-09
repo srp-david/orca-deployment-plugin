@@ -26,6 +26,9 @@ export type RunView = {
   skip: ListRow[]
   notes: ListRow[]
   errors: string[]
+  /** 사람이 보고 판단할 경고. 확인(warningsAcked)해야 올린다. */
+  warnings: string[]
+  warningsAcked: boolean
   /** 막힌 run 은 null. */
   code: string | null
   hasClass: boolean
@@ -80,6 +83,8 @@ export function viewRun(run: Run): RunView {
     skip: run.list('skip.tsv'),
     notes: run.list('notes.tsv'),
     errors: run.errors(),
+    warnings: run.warnings(),
+    warningsAcked: run.warningsAcked(),
     code: status === 'blocked' ? null : run.code(),
     hasClass: rows.some((r) => r.local.endsWith('.class')),
     uploaded: status === 'uploaded' || status === 'verified' ? rows.length : run.uploadedCount(),
@@ -107,8 +112,8 @@ export function renderRun(v: RunView): string {
     for (const m of v.manual) out.push(`${m.path}  — ${m.reason}`)
   }
   if (v.notes.length) {
-    out.push('', '== 빌드 폴더의 옛 내부 클래스 (올리지 않음) ==')
-    for (const m of v.notes) out.push(m.path)
+    out.push('', '== 참고 ==')
+    for (const m of v.notes) out.push(`${m.path}  — ${m.reason}`)
   }
   if (v.skip.length) {
     out.push('', '== 매핑 밖 파일 ==')
@@ -120,5 +125,8 @@ export function renderRun(v: RunView): string {
   if (v.errors.length) {
     out.push('== 문제 (해결 전에는 반영하지 않음) ==', ...v.errors)
   } else if (v.code) out.push(`확인 코드: ${v.code}`)
+  if (v.warnings.length) {
+    out.push(`== 경고 ${v.warnings.length}건 (${v.warningsAcked ? '확인함' : `사람이 보고 확인해야 올림: ack ${v.id}`}) ==`, ...v.warnings)
+  }
   return out.join('\n')
 }

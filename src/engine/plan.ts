@@ -13,6 +13,7 @@ import {
   viewPr,
   type Change
 } from './git.ts'
+import { changedConstants, readClass } from './classfile.ts'
 import { newRun, type Run } from './runs.ts'
 import {
   cleanLocal,
@@ -196,8 +197,14 @@ function javaChanges(t: Target, changes: Change[]): string[] {
 
 export type ClassFile = { rel: string; abs: string; outer: boolean; mtime: number; major: number }
 
-/** 바뀐 .java 하나의 빌드 결과: 바깥 class 와 내부 class($*.class). */
-export function classFilesOf(t: Target, javaPath: string): { files: ClassFile[]; expected: string; sourceMtime: number } {
+/**
+ * 바뀐 .java 하나의 빌드 결과: 바깥 class, 내부 class($*.class), 그리고 같은 파일에 함께 선언된 다른 최상위 class
+ * (class 의 SourceFile 이 이 파일인 것). 같은 폴더에서 읽지 못한 class 는 unreadable 에.
+ */
+export function classFilesOf(
+  t: Target,
+  javaPath: string
+): { files: ClassFile[]; expected: string; sourceMtime: number; unreadable: string[] } {
   const java = t.java!
   const src = cleanLocal(java.source)
   const out = cleanLocal(java.output)
@@ -208,9 +215,22 @@ export function classFilesOf(t: Target, javaPath: string): { files: ClassFile[];
   const dirRel = relDir ? `${out}/${relDir}` : out
   const dirAbs = join(toNative(t.repo), dirRel)
   const sourceMtime = statSync(join(toNative(t.repo), javaPath)).mtimeMs
+  const unreadable: string[] = []
+  const fromSource = (n: string) => {
+    if (n === `${base}.class` || n.startsWith(`${base}$`)) return true
+    let source: string | null
+    try {
+      source = readClass(readFileSync(join(dirAbs, n))).sourceFile
+    } catch {
+      source = null
+    }
+    // 소스 파일 이름이 없으면 이 소스에서 나온 class 인지 알 수 없다: 빠뜨리지 않게 문제로 올린다.
+    if (source === null) unreadable.push(`${dirRel}/${n}`)
+    return source === `${base}.java`
+  }
   const names = existsSync(dirAbs)
     ? readdirSync(dirAbs)
-        .filter((n) => n === `${base}.class` || (n.startsWith(`${base}$`) && n.endsWith('.class')))
+        .filter((n) => n.endsWith('.class') && fromSource(n))
         .sort((a, b) => (a === `${base}.class` ? -1 : b === `${base}.class` ? 1 : a < b ? -1 : a > b ? 1 : 0))
     : []
   const files: ClassFile[] = names.map((n) => {
@@ -219,7 +239,7 @@ export function classFilesOf(t: Target, javaPath: string): { files: ClassFile[];
     const major = head.length === 8 && head.readUInt32BE(0) === 0xcafebabe ? head.readUInt16BE(6) : -1
     return { rel: `${dirRel}/${n}`, abs, outer: n === `${base}.class`, mtime: statSync(abs).mtimeMs, major }
   })
-  return { files, expected: `${dirRel}/${base}.class`, sourceMtime }
+  return { files, expected: `${dirRel}/${base}.class`, sourceMtime, unreadable }
 }
 
 type Ctx = {
@@ -227,7 +247,31 @@ type Ctx = {
   run: Run
   tip: string
   base: string
-  targets: { local: string; remote: string; path: string }[]
+  /** path 는 저장소 기준 경로, class 면 'class' 이고 java 에 그 소스. */
+  targets: { local: string; remote: string; path: string; java?: string }[]
+  /** 이미 문제로 적은 빌드 폴더 class */
+  reported: Set<string>
+}
+
+type ConstHit = { java: string; cls: string; name: string; before: string; after: string }
+
+/**
+ * 값이 바뀐 상수를 쓸 수 있는 다른 소스: 상수 이름이 낱말로 나오는 `.java` 전부.
+ * Java 는 상수를 여러 길로 부를 수 있다(Foo.LIMIT, import static, 상속받아 LIMIT, 식.LIMIT 등). class 이름으로
+ * 걸러 내면 놓치는 길이 생기므로 거르지 않는다. 같은 이름의 다른 상수·주석까지 잡으니 필요 없이 막힐 수는 있다.
+ * 못 찾는 경우: 소스에 이름을 \uXXXX 로 적은 경우.
+ */
+async function constantUsers(t: Target, tip: string, hit: ConstHit): Promise<string[]> {
+  const src = cleanLocal(t.java!.source)
+  const r = await git(t.repo, ['grep', '-l', '-z', '-F', '-w', '--no-color', '-e', hit.name, tip, '--', `${src}/*.java`])
+  // 0 = 찾음, 1 = 없음. 그 밖(실행 실패 등)은 "없음"으로 보지 않는다.
+  if (r.code !== 0 && r.code !== 1) throw new Error(`git grep 실패(${r.code}): ${r.err.trim()}`)
+  return r.out
+    .toString('utf8')
+    .split('\0')
+    .filter(Boolean)
+    .map((s) => s.slice(tip.length + 1))
+    .filter((p) => p !== hit.java)
 }
 
 const diffQuiet = (repo: string, a: string[], path: string) => gitOk(repo, ['diff', '--quiet', ...a, '--', path])
@@ -239,7 +283,9 @@ async function classify(ctx: Ctx, ch: Change): Promise<void> {
   const why = manualReason(t, path)
   if (why) return run.append('manual.tsv', `${path}\t${why}\n`)
   if (ch.status === 'D') {
-    if (inAnyMapping(t, path)) return run.append('manual.tsv', `${path}\t삭제된 파일 — 운영에서 지울지 손으로\n`)
+    // src/main 은 매핑이 없어도 WAR 에 들어가는 곳이라, 지운 파일도 운영에 남아 있을 수 있다.
+    if (inAnyMapping(t, path) || path.startsWith('src/main/'))
+      return run.append('manual.tsv', `${path}\t삭제된 파일 — 운영에서 지울지 손으로\n`)
     return run.append('skip.tsv', `${path}\t매핑 밖 파일\n`)
   }
   const err = (s: string) => run.append('errors.txt', s + '\n')
@@ -250,6 +296,12 @@ async function classify(ctx: Ctx, ch: Change): Promise<void> {
     const c = classFilesOf(t, path)
     const outer = c.files.find((x) => x.outer)
     if (!outer) return err(`class 없음(메인 체크아웃에서 빌드 필요): ${msysRepo}/${c.expected}`)
+    for (const u of c.unreadable) {
+      // 같은 폴더의 다른 소스도 같은 class 를 보므로 한 번만 적는다.
+      if (ctx.reported.has(u)) continue
+      ctx.reported.add(u)
+      err(`빌드 폴더의 class 를 읽지 못했거나 소스 파일 이름(SourceFile)이 없음 — 이 소스에서 나온 것인지 모름: ${msysRepo}/${u}`)
+    }
     for (const f of c.files) {
       const local = `${msysRepo}/${f.rel}`
       if (f.mtime < c.sourceMtime) {
@@ -263,12 +315,17 @@ async function classify(ctx: Ctx, ch: Change): Promise<void> {
         err(`class 를 운영에 잇는 매핑 없음: ${f.rel}`)
         continue
       }
-      ctx.targets.push({ local, remote, path: 'class' })
+      ctx.targets.push({ local, remote, path: 'class', java: path })
     }
     return
   }
   const remote = remotePathOf(t, path)
-  if (!remote) return run.append('skip.tsv', `${path}\t매핑 밖 파일\n`)
+  if (!remote) {
+    // src/main 은 빌드가 WAR 에 넣는 곳이다. 여기 파일이 매핑 밖이면 조용히 빠지지 않게 막는다.
+    if (path.startsWith('src/main/'))
+      return err(`운영에 들어가는 폴더(src/main)인데 경로 매핑·손 처리 규칙이 없음: ${path} — 매핑을 추가하거나 손 처리 규칙에 넣으세요`)
+    return run.append('skip.tsv', `${path}\t매핑 밖 파일\n`)
+  }
   if (!(await diffQuiet(repo, [ctx.tip, 'HEAD'], path))) return err(`main 에 이후 변경 있음(HEAD 파일 ≠ 반영 커밋): ${path}`)
   if (!(await diffQuiet(repo, ['HEAD'], path))) return err(`메인 체크아웃에 커밋 안 한 수정 있음: ${path}`)
   ctx.targets.push({ local: `${msysRepo}/${path}`, remote, path })
@@ -299,13 +356,13 @@ export async function plan(
   run.write('meta.env', `RUN_TARGET=${t.id}\nBASE=${base}\nTIP=${tip}\nHEADC=${head}\n`)
   run.write('target.json', JSON.stringify(t, null, 2) + '\n')
   if (pr) run.write('pr.json', JSON.stringify(pr, null, 2) + '\n')
-  for (const f of ['targets.tsv', 'manual.tsv', 'skip.tsv', 'errors.txt', 'plan.tsv', 'notes.tsv']) run.write(f, '')
+  for (const f of ['targets.tsv', 'manual.tsv', 'skip.tsv', 'errors.txt', 'warnings.txt', 'plan.tsv', 'notes.tsv']) run.write(f, '')
   const c = t.connection
   log(`대상: ${t.label} → ftp://${c.host}${c.port && c.port !== 21 ? ':' + c.port : ''}${c.root}`)
   log(`plan: ${subject} (기준 ${short(base)}, HEAD ${short(head)})`)
 
   try {
-    const ctx: Ctx = { t, run, tip, base, targets: [] }
+    const ctx: Ctx = { t, run, tip, base, targets: [], reported: new Set() }
     for (const ch of pf.changes) await classify(ctx, ch)
     run.write('targets.tsv', ctx.targets.map((x) => `${x.local}\t${x.remote}\t${x.path}\n`).join(''))
 
@@ -313,10 +370,18 @@ export async function plan(
     let n = 0
     // 반영 목록은 다 모은 뒤 한 번에 쓴다: 중간에 끊긴 plan 의 반쪽 목록이 남지 않게.
     const lines: string[] = []
+    const consts: ConstHit[] = []
     for (const x of ctx.targets) {
       progress(++n, ctx.targets.length)
       const lsha = shaFile(x.local)
       if (!(await ftp.exists(x.remote))) {
+        // 새 class 는 비교할 운영본이 없지만, 올릴 파일이 class 형식인지는 본다.
+        if (x.path === 'class')
+          try {
+            readClass(readFileSync(toNative(x.local)))
+          } catch (e) {
+            run.append('errors.txt', `class 를 읽지 못함(${(e as Error).message}): ${x.local}\n`)
+          }
         lines.push(`A\t${x.local}\t${x.remote}\t${lsha}\t-\t\n`)
         continue
       }
@@ -336,10 +401,37 @@ export async function plan(
             else run.append('errors.txt', `운영본이 직전 커밋과 다름(운영에만 있는 수정?): ${x.remote}\n`)
           }
         } else run.append('errors.txt', `저장소엔 새 파일인데 운영에 이미 있음: ${x.remote}\n`)
-      } else note = 'class 는 운영본 대조 생략'
+      } else {
+        note = 'class 는 상수 값만 운영본과 대조'
+        try {
+          const now = readClass(r)
+          const next = readClass(readFileSync(toNative(x.local)))
+          for (const c of changedConstants(now, next)) consts.push({ java: x.java!, cls: next.name, ...c })
+        } catch (e) {
+          run.append('errors.txt', `class 의 상수를 읽지 못함(${(e as Error).message}): ${x.remote}\n`)
+        }
+      }
       lines.push(`M\t${x.local}\t${x.remote}\t${lsha}\t${sha256(r)}\t${note}\n`)
     }
     run.write('plan.tsv', lines.join(''))
+
+    // 상수 값이 바뀌었으면 그 상수를 쓰는 class 도 함께 올라가야 한다. 이 반영에 없는 소스에 그 이름이 나오면
+    // 경고로 남긴다: 이름만 같은 다른 변수일 수도 있어 사람이 보고 판단한다(확인해야 올림).
+    const inPlan = new Set(ctx.targets.map((x) => x.java).filter(Boolean))
+    for (const h of consts) {
+      const where = `${h.cls.replace(/\//g, '.').replace(/\$/g, '.')}.${h.name} (${h.before} → ${h.after})`
+      const missing = (await constantUsers(t, tip, h)).filter((p) => !inPlan.has(p))
+      if (missing.length)
+        run.append(
+          'warnings.txt',
+          `상수 값이 바뀜: ${where} — 이 이름이 나오는 소스가 반영 목록에 없음: ${missing.join(', ')} — 정말 이 상수를 쓰면 그 class 도 함께 올려야 함(값이 복사돼 있음)\n`
+        )
+      else
+        run.append(
+          'notes.tsv',
+          `${h.cls}.class\t상수 ${h.name} 값이 바뀜 (${h.before} → ${h.after}) — 이 이름이 나오는 다른 소스가 없거나 이 반영 목록에 다 있음\n`
+        )
+    }
   } catch (e) {
     // 중간에 끊긴 plan 은 반쯤 만든 반영 목록이 정상으로 보이지 않도록 막힌 run 으로 남긴다.
     run.append('errors.txt', `plan 중단: ${(e as Error).message}\n`)
@@ -362,5 +454,7 @@ export async function plan(
   }
   const code = run.code()
   log(`plan 완료: ${rows.length}개, 코드 ${code}`)
+  const warnings = run.warnings()
+  if (warnings.length) log(`경고 ${warnings.length}건 — 사람이 보고 "확인함" 해야 올림`)
   return { preflight: pf, run, code }
 }

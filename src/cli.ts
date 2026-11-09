@@ -7,6 +7,7 @@
 //                                             읽기만. 준비 확인 → 반영 목록·운영 대조 → 확인 코드
 //                                             --backup: 이어서 백업까지 (패널의 "반영 목록 만들기")
 //   backup <run>                              읽기만. 덮어쓸 운영 파일을 run/backup/ 에 받고 plan 때와 대조
+//   ack    <run>                              run 의 경고를 사람이 보고 확인했다고 남김(경고가 있으면 이게 있어야 올림)
 //   upload <run> --plan <코드> --yes           운영에 올리고 이어서 대조 (평소에는 패널 버튼으로. 패널을 못 쓸 때만)
 //   verify <run>                              읽기만. 운영 파일이 올린 로컬 파일과 같은지 대조
 //   rollback <run> --plan <코드> --yes         백업을 되올리고 새로 만든 파일은 지움
@@ -23,7 +24,7 @@
 import { credentialUser, deleteCredential, writeCredential } from './engine/creds.ts'
 import { JobWriter, type JobStep } from './engine/jobs.ts'
 import { plan, preflight } from './engine/plan.ts'
-import { clearStaleLock, listRuns, openRun, STATUS_LABEL } from './engine/runs.ts'
+import { ackWarnings, clearStaleLock, listRuns, openRun, STATUS_LABEL } from './engine/runs.ts'
 import { backup, rollback, upload, verify } from './engine/steps.ts'
 import { detectTarget, listTargets, loadTarget, loadTargetOrDeleted, type Target } from './engine/target.ts'
 import { Stop } from './engine/util.ts'
@@ -51,7 +52,7 @@ const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[
 
 function usage(): never {
   process.stdout.write(
-    `사용법: node src/cli.ts <targets|check|plan|backup|upload|verify|rollback|runs|show|unlock|creds> ...\n` +
+    `사용법: node src/cli.ts <targets|check|plan|backup|ack|upload|verify|rollback|runs|show|unlock|creds> ...\n` +
       `자세한 인자는 src/cli.ts 맨 위 설명을 보세요.\n`
   )
   process.exit(2)
@@ -211,6 +212,12 @@ async function main(): Promise<number> {
       const id = a.positional[0] ?? usage()
       const v = viewRun(openRun(id))
       say(json ? JSON.stringify(v) : renderRun(v))
+      return 0
+    }
+
+    case 'ack': {
+      const id = a.positional[0] ?? usage()
+      say(ackWarnings(openRun(id), by))
       return 0
     }
 
