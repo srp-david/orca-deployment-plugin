@@ -90,8 +90,6 @@ declare module 'orca' {
     /** run 기록 화면에서 숨기기(hidden: true 면 보이는 run 모두, 부분 업로드는 빼고) / 다시 보이기(모두). */
     'runs.hide': { input: { target: string; hidden: boolean }; output: { count: number; kept: number } }
     'run.get': { input: { id: string }; output: { view: RunView; log: string[] } }
-    /** run 의 경고를 사람이 보고 확인했다고 남긴다. 경고가 있으면 이게 있어야 업로드된다. */
-    'run.ack': { input: { id: string }; output: { message: string } }
     /** 끝난 작업이 남긴 잠금을 푼다. 살아 있는 작업의 잠금이면 거절. */
     'lock.clear': { input: { target: string }; output: { message: string } }
     /** 패널이 지금 사람에게 보이는지. 상태 표시줄을 누를 때 열지·닫을지 정하는 데 쓴다. */

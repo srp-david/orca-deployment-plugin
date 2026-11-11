@@ -10,7 +10,7 @@ import { credentialUser, deleteCredential, writeCredential } from './engine/cred
 import { mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
-import { ackWarnings, clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
+import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
 import {
   deleteTarget,
   detectTarget,
@@ -399,8 +399,6 @@ export default function activate(orca: OrcaWorkerApi): void {
   )
 
   orca.panels.handle('lock.clear', ({ target }) => guard(() => ({ message: clearStaleLock(target) })))
-
-  orca.panels.handle('run.ack', ({ id }) => guard(() => ({ message: ackWarnings(openRun(id), 'panel') })))
 
   orca.panels.handle('run.get', ({ id }) =>
     guard(() => {

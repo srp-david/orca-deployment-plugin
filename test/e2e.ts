@@ -499,7 +499,7 @@ async function scenarios(tip1: string): Promise<void> {
   await step('상수 값이 바뀌었는데 이름이 나오는 소스(직접·상속·식)가 반영 목록에 없으면 경고', () => {
     const r = cli('plan', '--target', 'fx', tip5)
     assert.equal(r.code, 0, r.out)
-    assert.match(r.out, /== 경고 1건 \(사람이 보고 확인해야 올림: ack /)
+    assert.match(r.out, /== 경고 1건 \(올리기 전에 보세요\. 막지는 않음\) ==/)
     const line = /상수 값이 바뀜: com\.x\.Foo\.LIMIT \(1 → 2\) — 이 이름이 나오는 소스가 반영 목록에 없음: (.*?) — /.exec(r.out)
     assert.ok(line, r.out)
     assert.deepEqual(line[1].split(', ').sort(), [
@@ -529,26 +529,15 @@ async function scenarios(tip1: string): Promise<void> {
     assert.doesNotMatch(r.out, /== 경고/)
   })
 
-  await step('경고가 있는 run 은 사람이 확인(ack)해야 올라감', () => {
+  await step('경고가 있어도 업로드는 막지 않음(보여 주기만)', () => {
     const p = cli('plan', '--target', 'fx', tip5)
     const r = runOf(p.out)
     const c = codeOf(p.out)
     assert.equal(cli('backup', r).code, 0)
-    const blocked = cli('upload', r, '--plan', c, '--yes')
-    assert.equal(blocked.code, 1)
-    assert.match(blocked.out, /경고 1건을 사람이 확인해야 올림/)
-    assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit1'), '아무것도 올라가지 않음')
-    const ack = cli('ack', r, '--by', 'e2e')
-    assert.equal(ack.code, 0, ack.out)
-    assert.match(cli('show', r).out, /== 경고 1건 \(확인함\) ==/)
-    assert.match(readFileSync(`${tmp}/runs/${r}/warnings.ack`, 'utf8'), /\te2e\t/)
     const up = cli('upload', r, '--plan', c, '--yes')
     assert.equal(up.code, 0, up.out)
     assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit2'))
-    // 경고 내용이 확인 뒤 바뀌면 확인은 무효(여기서는 되돌리기 전에 상태만 본다)
-    writeFileSync(`${tmp}/runs/${r}/warnings.txt`, readFileSync(`${tmp}/runs/${r}/warnings.txt`, 'utf8') + 'x\n')
-    assert.match(cli('show', r).out, /== 경고 2건 \(사람이 보고 확인해야 올림/)
-    assert.equal(cli('ack', r).code, 1, '올린 run 은 확인할 수 없음')
+    assert.match(cli('show', r).out, /== 경고 1건 /)
     assert.equal(cli('rollback', r, '--plan', c, '--yes').code, 0)
     assert.ok(hasTag('WEB-INF/classes/com/x/Foo.class', 'foo-limit1'))
   })

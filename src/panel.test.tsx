@@ -7,7 +7,12 @@ const targets = [
   { id: 'test', label: '시험', host: '127.0.0.1', port: 2121, root: '/app', repo: 'C:/work/repos/my-app', test: true }
 ]
 
+/** extra 의 값이 undefined 인 칸은 응답에서 뺀다(Orca 는 undefined 칸이 든 응답을 거절한다). */
 function view(status: string, extra: Record<string, unknown> = {}) {
+  return JSON.parse(JSON.stringify(rawView(status, extra)))
+}
+
+function rawView(status: string, extra: Record<string, unknown>) {
   return {
     id: 'myapp-20261106-180000-abcdef12',
     target: 'myapp',
@@ -32,7 +37,6 @@ function view(status: string, extra: Record<string, unknown> = {}) {
     notes: [],
     errors: [],
     warnings: [],
-    warningsAcked: false,
     code: 'abcdef12',
     hasClass: true,
     uploaded: 0,
@@ -62,11 +66,7 @@ function host(status: string, started: unknown[], extra: Record<string, unknown>
         started.push(input)
         return { jobId: 'j1' }
       },
-      'run.get': { view: view(status, extra), log: [] },
-      'run.ack': (input: unknown) => {
-        started.push({ ack: input })
-        return { message: 'ok' }
-      }
+      'run.get': { view: view(status, extra), log: [] }
     }
   })
 }
@@ -230,16 +230,20 @@ test('run 기록: 목록 비우기는 숨기기만 하고, 숨긴 run 은 스위
   await v.unmount()
 })
 
-test('경고가 있으면 "확인함" 전에는 업로드가 꺼지고, 확인함을 누르면 그 run 으로 확인 요청', async () => {
+test('경고는 보여 주기만 하고 업로드를 막지 않는다', async () => {
   const w = ['상수 값이 바뀜: com.x.Foo.LIMIT (1 → 2) — 이 이름이 나오는 소스가 반영 목록에 없음: src/Bar.java']
   const { v, started } = await planned('backedUp', { warnings: w })
   assert.ok(v.find({ text: /경고 1건/ }))
-  assert.equal(v.find({ text: /My App에 2개 업로드$/ })!.disabled, true)
-  await v.press({ text: '확인함' })
-  assert.deepEqual(started.at(-1), { ack: { id: 'myapp-20261106-180000-abcdef12' } })
+  assert.ok(v.find({ text: /src\/Bar\.java/ }))
+  assert.equal(v.find({ text: /My App에 2개 업로드$/ })!.disabled, false)
+  await v.press({ text: /My App에 2개 업로드$/ })
+  assert.deepEqual(started.at(-1), { step: 'upload', target: 'myapp', run: 'myapp-20261106-180000-abcdef12', code: 'abcdef12' })
   await v.unmount()
-  const acked = await planned('backedUp', { warnings: w, warningsAcked: true })
-  assert.equal(acked.v.find({ text: /My App에 2개 업로드$/ })!.disabled, false)
-  assert.equal(acked.v.find({ text: '확인함' }), null)
-  await acked.v.unmount()
+})
+
+test('경고 칸이 없는 run(예전 워커)도 그린다', async () => {
+  const { v } = await planned('backedUp', { warnings: undefined })
+  assert.ok(v.find({ text: /My App에 2개 업로드$/ }))
+  assert.deepEqual(v.errors, [])
+  await v.unmount()
 })

@@ -287,13 +287,6 @@ async function runStep(step: 'backup' | 'upload' | 'verify' | 'rollback'): Promi
   await start(step, { run: d.view.id, code: step === 'upload' || step === 'rollback' ? (d.view.code ?? '') : undefined })
 }
 
-/** run 의 경고를 사람이 보고 확인했다고 남긴다. */
-async function ackRun(run: string): Promise<void> {
-  act()
-  const r = await ask(() => plugin.request('run.ack', { id: run }))
-  if (r && read(runId) === run) await loadRun(run)
-}
-
 async function clearLock(target: string, run: string): Promise<void> {
   act()
   const r = await ask(() => plugin.request('lock.clear', { target }))
@@ -672,8 +665,9 @@ function RunCard() {
   const busy = !!job || !!v.busy
   const last = lastJob(t.id, v.id)
   const canBackup = !v.configChanged && (v.status === 'planned' || v.status === 'backedUp')
-  const needsAck = v.warnings.length > 0 && !v.warningsAcked
-  const canUpload = !v.configChanged && v.status === 'backedUp' && !needsAck
+  const canUpload = !v.configChanged && v.status === 'backedUp'
+  // 워커가 예전 판이면 경고 칸이 없다.
+  const warnings = v.warnings ?? []
   const canVerify = v.status === 'uploaded' || v.status === 'verified'
   const canRollback = v.status === 'partial' || v.status === 'uploaded' || v.status === 'verified'
   const tone = v.status === 'blocked' ? 'danger' : v.status === 'verified' ? 'success' : v.status === 'partial' ? 'warning' : 'accent'
@@ -715,28 +709,17 @@ function RunCard() {
             </Stack>
           </Callout>
         )}
-        {v.warnings.length > 0 && (
-          <Callout
-            tone="warning"
-            title={`경고 ${v.warnings.length}건 — ${v.warningsAcked ? '확인함' : '보고 판단한 뒤 확인하세요'}`}
-            icon="warning"
-          >
+        {warnings.length > 0 && (
+          <Callout tone="warning" title={`경고 ${warnings.length}건 — 올리기 전에 보세요`} icon="warning">
             <Stack gap="xs">
-              {v.warnings.map((w, i) => (
+              {warnings.map((w, i) => (
                 <Text key={`w${i}`} size="xs">
                   {w}
                 </Text>
               ))}
-              {needsAck && canBackup && (
-                <>
-                  <Text size="xs" muted>
-                    적힌 소스를 열어 보고, 이름만 같은 다른 변수면 확인하세요. 정말 그 상수를 쓰면 그 class 도 함께 올려야 하니 이 run 은 쓰지 마세요.
-                  </Text>
-                  <Button size="sm" variant="outline" icon="check" disabled={busy} onPress={() => ackRun(v.id)}>
-                    확인함
-                  </Button>
-                </>
-              )}
+              <Text size="xs" muted>
+                업로드를 막지는 않습니다. 적힌 소스가 이름만 같은 다른 변수면 그대로 올려도 됩니다. 정말 그 상수를 쓰면 그 class 도 함께 올려야 합니다.
+              </Text>
             </Stack>
           </Callout>
         )}
@@ -827,9 +810,7 @@ function RunCard() {
               {`${v.label}에 ${v.total}개 업로드`}
             </Button>
             <Text size="xs" muted>
-              {needsAck
-                ? '위 경고를 확인해야 올릴 수 있습니다.'
-                : '누르면 운영 파일을 다시 대조한 뒤 올리고, 올린 뒤 바로 대조합니다. 이 버튼이 최종 확인입니다.'}
+              누르면 운영 파일을 다시 대조한 뒤 올리고, 올린 뒤 바로 대조합니다. 이 버튼이 최종 확인입니다.
             </Text>
           </Stack>
         )}

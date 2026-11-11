@@ -227,8 +227,6 @@ export async function upload(id: string, code: string, yes: boolean, h: StepHook
     if (run.uploadBegun()) stop(run, h, '부분 업로드된 run — 이어 올리지 않음. 되돌린 뒤 새로 plan')
     if (!run.has('backup.done')) stop(run, h, `백업 먼저(backup ${run.id})`)
     if (configChanged(run)) stop(run, h, '대상 설정이 plan 이후 바뀜 — 새로 plan')
-    if (run.warnings().length && !run.warningsAcked())
-      stop(run, h, `경고 ${run.warnings().length}건을 사람이 확인해야 올림 — 패널의 "확인함" (CLI: ack ${run.id})`)
     checkBackup(run, h)
     const rows = run.plan()
     const staged = stage(run, rows, h)

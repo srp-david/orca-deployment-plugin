@@ -26,9 +26,8 @@ export type RunView = {
   skip: ListRow[]
   notes: ListRow[]
   errors: string[]
-  /** 사람이 보고 판단할 경고. 확인(warningsAcked)해야 올린다. */
+  /** 사람이 보고 판단할 경고. 보여 주기만 하고 막지 않는다. */
   warnings: string[]
-  warningsAcked: boolean
   /** 막힌 run 은 null. */
   code: string | null
   hasClass: boolean
@@ -84,7 +83,6 @@ export function viewRun(run: Run): RunView {
     notes: run.list('notes.tsv'),
     errors: run.errors(),
     warnings: run.warnings(),
-    warningsAcked: run.warningsAcked(),
     code: status === 'blocked' ? null : run.code(),
     hasClass: rows.some((r) => r.local.endsWith('.class')),
     uploaded: status === 'uploaded' || status === 'verified' ? rows.length : run.uploadedCount(),
@@ -126,7 +124,7 @@ export function renderRun(v: RunView): string {
     out.push('== 문제 (해결 전에는 반영하지 않음) ==', ...v.errors)
   } else if (v.code) out.push(`확인 코드: ${v.code}`)
   if (v.warnings.length) {
-    out.push(`== 경고 ${v.warnings.length}건 (${v.warningsAcked ? '확인함' : `사람이 보고 확인해야 올림: ack ${v.id}`}) ==`, ...v.warnings)
+    out.push(`== 경고 ${v.warnings.length}건 (올리기 전에 보세요. 막지는 않음) ==`, ...v.warnings)
   }
   return out.join('\n')
 }

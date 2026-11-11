@@ -9,7 +9,6 @@ node src/cli.ts targets                                   # 대상 목록
 node src/cli.ts check  --target myapp "#123"              # 준비 확인만
 node src/cli.ts plan   --target myapp "#123" --backup     # 반영 목록 만들기(plan + 백업) → run 이름·확인 코드
 node src/cli.ts backup <run>                              # 백업만 다시
-node src/cli.ts ack    <run>                              # 경고를 사람이 보고 확인함(경고가 있으면 이게 있어야 올림)
 node src/cli.ts upload <run> --plan <확인 코드> --yes      # 올리고 이어서 대조
 node src/cli.ts verify <run>                              # 대조만 다시
 node src/cli.ts rollback <run> --plan <확인 코드> --yes
@@ -48,9 +47,9 @@ node skill/install.mjs   # ~/.claude/skills/prod-deploy/ 로 복사 (덮어쓰�
   "permissions": {
     "ask": [
       "Bash(node *cli.ts upload *)", "Bash(node *cli.ts rollback *)",
-      "Bash(node *cli.ts unlock *)", "Bash(node *cli.ts creds *)", "Bash(node *cli.ts ack *)",
+      "Bash(node *cli.ts unlock *)", "Bash(node *cli.ts creds *)",
       "PowerShell(node *cli.ts upload *)", "PowerShell(node *cli.ts rollback *)",
-      "PowerShell(node *cli.ts unlock *)", "PowerShell(node *cli.ts creds *)", "PowerShell(node *cli.ts ack *)"
+      "PowerShell(node *cli.ts unlock *)", "PowerShell(node *cli.ts creds *)"
     ]
   },
   "hooks": {

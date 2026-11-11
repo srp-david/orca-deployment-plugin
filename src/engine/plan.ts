@@ -416,7 +416,7 @@ export async function plan(
     run.write('plan.tsv', lines.join(''))
 
     // 상수 값이 바뀌었으면 그 상수를 쓰는 class 도 함께 올라가야 한다. 이 반영에 없는 소스에 그 이름이 나오면
-    // 경고로 남긴다: 이름만 같은 다른 변수일 수도 있어 사람이 보고 판단한다(확인해야 올림).
+    // 경고로 남긴다: 이름만 같은 다른 변수일 수도 있어 사람이 보고 판단한다. 경고는 run 을 막지 않는다.
     const inPlan = new Set(ctx.targets.map((x) => x.java).filter(Boolean))
     for (const h of consts) {
       const where = `${h.cls.replace(/\//g, '.').replace(/\$/g, '.')}.${h.name} (${h.before} → ${h.after})`
@@ -455,6 +455,6 @@ export async function plan(
   const code = run.code()
   log(`plan 완료: ${rows.length}개, 코드 ${code}`)
   const warnings = run.warnings()
-  if (warnings.length) log(`경고 ${warnings.length}건 — 사람이 보고 "확인함" 해야 올림`)
+  if (warnings.length) log(`경고 ${warnings.length}건 — 올리기 전에 보세요(막지는 않음)`)
   return { preflight: pf, run, code }
 }
