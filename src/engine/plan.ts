@@ -22,6 +22,7 @@ import {
   mainBranch,
   manualReason,
   remotePathOf,
+  repoProblem,
   type Target
 } from './target.ts'
 import { sameBytes, sameIgnoringCR, sha256, shaFile, stamp, Stop, toMsys, toNative } from './util.ts'
@@ -56,7 +57,8 @@ export async function preflight(t: Target, specText: string, opts: { fetch?: boo
   const branchName = mainBranch(t)
   const upstream = `${gitRemote(t)}/${branchName}`
   const items: CheckItem[] = []
-  if (!existsSync(toNative(repo))) throw new Stop(`메인 체크아웃이 없음: ${repo}`)
+  const missing = repoProblem(repo)
+  if (missing) throw new Stop(missing)
 
   let fetchNote: string | null = null
   if (opts.fetch !== false) {

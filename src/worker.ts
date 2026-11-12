@@ -18,12 +18,14 @@ import {
   loadTarget,
   mainBranch,
   netrcPath,
+  repoProblem,
   saveTarget,
   validateTarget,
   type Target
 } from './engine/target.ts'
 import { Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
+import { cliSpawnError } from './cli-spawn.ts'
 import { configVerdict } from './config-verdict.ts'
 import { openPanel } from './open-panel.ts'
 import type { RecentPr, RunSummary, TargetSummary, Workspace } from './protocol.ts'
@@ -305,6 +307,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     guard(() => {
       const t = loadTarget(target)
       if (!existsSync(CLI)) throw new Stop(`CLI 를 찾지 못함: ${CLI}`)
+      // CLI 는 메인 체크아웃에서 띄운다. 폴더가 없으면 spawn 이 "node ENOENT" 로만 알려 줘서 원인을 알 수 없다.
+      const cwd = toNative(t.repo)
+      const missing = repoProblem(t.repo)
+      if (missing) throw new Stop(missing)
       const busy = listJobs().find((j) => j.target === target && (j.state === 'running' || j.state === 'starting'))
       if (busy) throw new Stop(`${target} 에서 ${LABEL[busy.step]} 작업이 아직 도는 중`)
       const args: string[] = [step]
@@ -340,14 +346,14 @@ export default function activate(orca: OrcaWorkerApi): void {
       // 작업 기록을 먼저 남겨야 진행을 지켜볼 수 있다: 못 남기면 띄우지 않는다.
       if (!writeJob(job, 20)) throw new Stop('작업 기록을 쓰지 못해 시작하지 않음 — 잠시 뒤 다시')
       const child = spawn('node', [CLI, ...args, '--job', id, '--by', 'panel'], {
-        cwd: toNative(t.repo),
+        cwd,
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
         env: process.env
       })
       child.on('error', (e: Error) => {
-        writeJob({ ...job, state: 'failed', message: `CLI 를 띄우지 못함: ${e.message}`, endedAt: Date.now() }, 20)
+        writeJob({ ...job, state: 'failed', message: cliSpawnError(e, t.repo), endedAt: Date.now() }, 20)
       })
       // 띄운 프로세스 번호는 워커가 기억한다(파일은 다시 쓰지 않음 — CLI 가 먼저 쓴 상태를 덮지 않도록).
       // CLI 의 첫 기록이 실패해 파일만 보면 "끝남"으로 추정되더라도, 이 프로세스가 살아 있으면 계속 지켜본다.

@@ -1,8 +1,8 @@
 // 대상 설정: ~/.prod-deploy/targets/<id>.json. 패널·CLI·워커가 이 파일 하나를 같이 쓴다.
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { commonDir } from './git.ts'
-import { expandHome, home, Stop } from './util.ts'
+import { expandHome, home, Stop, toNative } from './util.ts'
 
 /** 저장소 폴더 하나 → 운영 루트 아래 폴더 하나 (IntelliJ Deployment 의 Mappings). */
 export type Mapping = { local: string; remote: string }
@@ -317,4 +317,15 @@ export async function sameRepo(dir: string, t: Target): Promise<boolean | null> 
   const a = await commonDir(dir)
   if (!a) return null
   return a === (await commonDir(t.repo))
+}
+
+/** 메인 체크아웃을 쓸 수 없으면(없음·폴더가 아님·열 수 없음) 사람에게 보여 줄 말, 쓸 수 있으면 null. */
+export function repoProblem(repo: string): string | null {
+  let ok = false
+  try {
+    ok = statSync(toNative(repo)).isDirectory()
+  } catch {
+    // 없거나 열 수 없음
+  }
+  return ok ? null : `메인 체크아웃이 없음: ${repo} — 대상 설정의 메인 체크아웃을 이 PC 에 있는 폴더 경로로 고치세요`
 }

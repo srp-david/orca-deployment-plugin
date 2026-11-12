@@ -115,6 +115,19 @@ test('작업 시작: 다른 대상의 run 이나 확인 코드 없는 업로드�
   await worker.deactivate()
 })
 
+test('작업 시작: 메인 체크아웃 폴더가 없으면 CLI 를 띄우지 않고 그 경로를 알려 준다', async () => {
+  const missing = { ...target, id: 'nofolder', repo: `${home}/no-such-repo` }
+  writeFileSync(`${home}/home/targets/nofolder.json`, JSON.stringify(missing))
+  const worker = await mountWorker(main, { host: host([]) })
+  try {
+    await worker.request('job.start', { step: 'plan', target: 'nofolder', spec: '#1' })
+    assert.fail('폴더가 없는데 작업이 시작됨')
+  } catch (e) {
+    assert.match(String((e as Error).message), /메인 체크아웃이 없음: .*no-such-repo/)
+  }
+  await worker.deactivate()
+})
+
 test('상태 표시줄 명령: 패널이 보이면 오른쪽 사이드바를 닫는다', async () => {
   const h = host([])
   const worker = await mountWorker(main, { host: h })
