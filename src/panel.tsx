@@ -84,7 +84,10 @@ const runsNotice = atom<string | null>(null)
 type Editing = { session: number; draft: Target; saved: string; previousId: string | null; credUser: string | null; netrc: boolean }
 const editing = atom<Editing | null>(null)
 let editSession = 0
-const sameSession = (session: number): boolean => read(editing)?.session === session
+/** 다른 대상을 고르면 그 순간부터(불러오는 중에도) 앞 편집기의 응답은 받지 않는다. */
+const sameSession = (session: number): boolean => editSession === session && read(editing)?.session === session
+/** 불러오는 중인 대상. 그동안은 앞 대상의 편집기를 보여 주지 않는다(그 편집기에서 한 동작이 새 대상에 섞이지 않게). */
+const editLoading = atom<string | null>(null)
 const snapshot = (t: Target): string => JSON.stringify(t)
 const isDirty = (e: { draft: Target; saved: string }): boolean => snapshot(e.draft) !== e.saved
 /** 설정 저장·접속 정보 저장·설정 확인 시작 요청이 가는 중. 응답 순서가 뒤섞이지 않게 그동안 이 버튼들을 막는다. */
@@ -344,10 +347,16 @@ async function editTarget(id: string | null): Promise<void> {
   set(ruleSel, null)
   set(configCheck, null)
   const session = ++editSession
+  set(editLoading, null)
   if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false })
+  // 앞 편집기는 여기서 닫는다: 불러오는 동안 앞 대상의 응답·동작이 끼어들 자리를 없앤다.
+  set(editing, null)
+  set(editLoading, id)
   const d: TargetDetail | null = await ask(() => plugin.request('target.get', { id }))
   // 기다리는 사이 다른 대상을 골랐으면 이 응답은 버린다.
-  if (d && editSession === session) {
+  if (editSession !== session) return
+  set(editLoading, null)
+  if (d) {
     set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc })
     set(cred, { user: d.credUser ?? '', password: '' })
   }
@@ -385,8 +394,20 @@ async function saveEdit(): Promise<void> {
 async function deleteEdit(): Promise<void> {
   act()
   const e = read(editing)
-  if (!e?.previousId) return
-  await ask(() => plugin.request('target.delete', { id: e.previousId! }))
+  if (!e?.previousId || read(editBusy)) return
+  set(editBusy, true)
+  // 이 요청의 응답은 null 이라 ask 로는 성공과 실패를 가릴 수 없다.
+  let deleted = false
+  try {
+    await plugin.request('target.delete', { id: e.previousId })
+    deleted = true
+  } catch (err) {
+    set(error, message(err))
+  } finally {
+    set(editBusy, false)
+  }
+  // 지우지 못했으면 편집기를 닫지 않는다(저장하지 않은 변경이 사라지지 않게).
+  if (!deleted) return
   if (sameSession(e.session)) set(editing, null)
   await loadTargets()
 }
@@ -401,7 +422,9 @@ async function saveCred(): Promise<void> {
   if (!r || !sameSession(e.session)) return
   // 기다리는 사이 고친 칸은 그대로 두고, 저장된 사용자 이름만 바꾼다.
   update(editing, (now) => (now ? { ...now, credUser: r.user } : now))
-  set(cred, { user: r.user, password: '' })
+  // 기다리는 사이 계정 칸을 다시 고쳤으면 그 입력은 지우지 않는다.
+  const typed = read(cred)
+  if (typed.user === c.user && typed.password === c.password) set(cred, { user: r.user, password: '' })
   set(editNotice, `접속 정보 저장함 (사용자 ${r.user})`)
 }
 
@@ -998,6 +1021,7 @@ function TextField(props: { label: string; value: string; onChange: (v: string) 
 
 function TargetsTab() {
   const e = read(editing)
+  const loading = read(editLoading)
   const list = read(targets)
   return (
     <Stack gap="md">
@@ -1005,7 +1029,7 @@ function TargetsTab() {
         <Box grow>
           <Select
             label="고칠 대상"
-            value={e?.previousId ?? ''}
+            value={loading ?? e?.previousId ?? ''}
             placeholder="대상 고르기"
             options={list.map((t) => ({ value: t.id, label: t.label }))}
             onChange={(v) => void editTarget(v)}
@@ -1015,7 +1039,7 @@ function TargetsTab() {
           새 대상
         </Button>
       </Box>
-      {e ? <TargetEditor /> : <Text muted>대상을 고르거나 새로 만드세요.</Text>}
+      {e ? <TargetEditor /> : loading ? <Spinner label="대상 설정 불러오는 중" /> : <Text muted>대상을 고르거나 새로 만드세요.</Text>}
     </Stack>
   )
 }
@@ -1286,7 +1310,7 @@ function TargetEditor() {
           설정 저장
         </Button>
         {e.previousId && (
-          <Button icon="delete" variant="ghost" tone="danger" onPress={deleteEdit}>
+          <Button icon="delete" variant="ghost" tone="danger" disabled={busyEdit} onPress={deleteEdit}>
             대상 삭제
           </Button>
         )}

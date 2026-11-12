@@ -319,14 +319,35 @@ test('설정 확인: 저장하지 않은 변경이 있으면 막고, 앞의 확�
 })
 
 // ── 대상 설정: 응답이 늦게 오거나 순서가 바뀌는 경우 ──
+// 대기 중인 요청이 있으면 동작(press 등)이 끝나지 않는다. 그래서 동작을 걸어만 두고, 요청이 워커에 닿았는지(gate.entered)와
+// 화면이 바뀌었는지(until)를 기다려 순서를 맞춘다.
 
-/** 응답을 기다리는 동안에는 동작(press 등)이 끝나지 않는다. 기다리지 않고 걸어 둔 뒤, 화면이 반응할 틈만 준다. */
-const tick = () => new Promise((r) => setTimeout(r, 20))
+/** 응답 순서를 잘못 맞춘 시험이 끝없이 기다리지 않게 한다. */
+const slow = { timeout: 15000 }
 
-function deferred<T>() {
+/** 워커가 요청을 받았지만 아직 답하지 않은 상태를 만든다. */
+function gate<T>() {
   let resolve!: (value: T) => void
+  let enter!: () => void
   const promise = new Promise<T>((r) => (resolve = r))
-  return { promise, resolve }
+  const entered = new Promise<void>((r) => (enter = r))
+  return {
+    entered,
+    resolve,
+    handler: () => {
+      enter()
+      return promise
+    }
+  }
+}
+
+/** 조건이 맞을 때까지 기다린다(느린 환경에서도 순서가 흔들리지 않게). */
+async function until(cond: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + 5000
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`기다리다 그만둠: ${what}`)
+    await new Promise((r) => setTimeout(r, 5))
+  }
 }
 
 const targetA = {
@@ -341,12 +362,27 @@ const targetA = {
   checkCommit: 'abc1234'
 }
 const targetB = { ...targetA, id: 'test', label: '시험', test: true, checkCommit: 'def5678', connection: { ...targetA.connection, host: '127.0.0.1', port: 2121, root: '/app' } }
+const detail = (id: string) => ({ target: id === 'test' ? targetB : targetA, credUser: 'ftpuser', netrc: false })
 const checkedView = () =>
   view('blocked', {
     errors: ['운영본이 이미 반영 커밋 내용과 같음(이미 반영됨?): /webapps/ROOT/ui/a.xml'],
     rows: [{ kind: 'M', local: 'src/main/webapp/ui/a.xml', remote: '/webapps/ROOT/ui/a.xml', note: '' }],
     code: null
   })
+const doneJob = (id: string) => ({
+  id,
+  step: 'plan',
+  target: 'myapp',
+  run: 'myapp-20261106-180000-abcdef12',
+  spec: 'abc1234',
+  state: 'done',
+  message: null,
+  progress: null,
+  lines: [],
+  startedAt: Date.now(),
+  endedAt: Date.now(),
+  pid: 1
+})
 
 async function editor(over: Record<string, unknown>) {
   const v = await mount(panel, {
@@ -357,7 +393,7 @@ async function editor(over: Record<string, unknown>) {
         'jobs.recent': [],
         'runs.list': [],
         'prs.recent': [],
-        'target.get': (input: { id: string }) => ({ target: input.id === 'test' ? targetB : targetA, credUser: 'ftpuser', netrc: false }),
+        'target.get': (input: { id: string }) => detail(input.id),
         'target.save': { errors: [] },
         ...over
       }
@@ -369,14 +405,14 @@ async function editor(over: Record<string, unknown>) {
   return v
 }
 
-test('늦게 온 저장 응답은 그 사이 연 다른 대상의 편집 상태를 덮지 않는다', async () => {
-  const save = deferred<{ errors: string[] }>()
-  const v = await editor({ 'target.save': () => save.promise })
+test('늦게 온 저장 응답은 그 사이 연 다른 대상의 편집 상태를 덮지 않는다', slow, async () => {
+  const save = gate<{ errors: string[] }>()
+  const v = await editor({ 'target.save': save.handler })
   await v.type({ label: '표시 이름' }, 'My App 2', { replace: true })
   const saving = v.press({ text: '설정 저장' })
-  await tick()
+  await save.entered
   const switching = v.select({ label: '고칠 대상' }, 'test')
-  await tick()
+  await until(() => v.find({ text: '설정 확인 (def5678)' }) !== null, '시험 대상 편집기')
   save.resolve({ errors: [] })
   await Promise.all([saving, switching])
   await v.settled()
@@ -389,30 +425,88 @@ test('늦게 온 저장 응답은 그 사이 연 다른 대상의 편집 상태�
   await v.unmount()
 })
 
-test('저장 요청이 가는 동안에는 저장을 다시 누를 수 없다', async () => {
-  const save = deferred<{ errors: string[] }>()
-  const v = await editor({ 'target.save': () => save.promise })
+test('대상을 바꾸면 불러오는 중에도 앞 대상의 응답은 받지 않는다', slow, async () => {
+  const start = gate<{ jobId: string }>()
+  const load = gate<unknown>()
+  let gets = 0
+  const v = await editor({
+    'job.start': start.handler,
+    // 처음(myapp)은 바로, 바꿀 때(test)는 늦게 답한다
+    'target.get': (input: { id: string }) => (gets++ === 0 ? detail(input.id) : load.handler()),
+    'run.get': { view: checkedView(), log: [] }
+  })
+  // A 의 설정 확인을 시작(응답 대기) → B 로 바꿈(불러오기 대기) → A 의 시작 응답 → B 불러오기 응답
+  const checking = v.press({ text: '설정 확인 (abc1234)' })
+  await start.entered
+  const switching = v.select({ label: '고칠 대상' }, 'test')
+  await load.entered
+  start.resolve({ jobId: 'j1' })
+  // 시작 응답이 패널에 닿을 틈을 준다(불러오기가 대기 중이라 press 가 끝나기를 기다릴 수는 없다). 이 틈이 모자라도
+  // 시험이 흔들리지는 않는다: 그때는 "B 를 연 뒤에 온 A 의 응답"이 되고, 그것도 받지 않아야 한다.
+  await new Promise((r) => setTimeout(r, 50))
+  load.resolve(detail('test'))
+  await Promise.all([checking, switching])
+  // A 의 작업이 끝났다는 소식이 와도 B 편집기에는 아무것도 붙지 않는다
+  await v.post('job.changed', doneJob('j1'))
+  await v.settled()
+  assert.equal(v.valueOf({ label: '표시 이름' }), '시험')
+  assert.equal(v.find({ text: /앞의 확인 결과는 보여 주지 않습니다/ }), null, JSON.stringify(v.summary()))
+  assert.equal(v.find({ text: /맞음: 1개 파일/ }), null)
+  assert.equal(v.find({ text: '설정 확인 (def5678)' })!.disabled, false)
+  await v.unmount()
+})
+
+test('대상을 불러오는 동안에는 앞 대상의 편집기를 보여 주지 않는다', slow, async () => {
+  const load = gate<unknown>()
+  let gets = 0
+  const v = await editor({ 'target.get': (input: { id: string }) => (gets++ === 0 ? detail(input.id) : load.handler()) })
+  const switching = v.select({ label: '고칠 대상' }, 'test')
+  await load.entered
+  await until(() => v.find({ text: '설정 저장' }) === null, '앞 대상의 편집기가 닫힘')
+  assert.equal(v.valueOf({ label: '고칠 대상' }), 'test')
+  load.resolve(detail('test'))
+  await switching
+  assert.equal(v.valueOf({ label: '표시 이름' }), '시험')
+  await v.unmount()
+})
+
+test('저장 요청이 가는 동안에는 저장·삭제를 누를 수 없고, 답이 오면 풀린다', slow, async () => {
+  const save = gate<{ errors: string[] }>()
+  const v = await editor({ 'target.save': save.handler })
   await v.type({ label: '표시 이름' }, 'My App 2', { replace: true })
   const saving = v.press({ text: '설정 저장' })
-  await tick()
-  assert.equal(v.find({ text: '설정 저장' })!.disabled, true)
+  await save.entered
+  await until(() => v.find({ text: '설정 저장' })!.disabled === true, '저장 버튼 잠김')
+  assert.equal(v.find({ text: '대상 삭제' })!.disabled, true)
   save.resolve({ errors: [] })
   await saving
   await v.settled()
   assert.equal(v.find({ text: '설정 저장' })!.disabled, false)
+  assert.ok(v.find({ text: '저장함' }))
   await v.unmount()
 })
 
-test('늦게 온 접속 정보 응답은 그 사이 고친 칸을 되돌리지 않는다', async () => {
-  const creds = deferred<{ user: string }>()
-  const v = await editor({ 'creds.set': () => creds.promise })
+test('저장이 거절되면(잘못된 설정) 고친 칸과 저장 안 된 상태가 그대로 남고 버튼은 풀린다', slow, async () => {
+  const v = await editor({ 'target.save': { errors: ['운영 루트가 잘못됨'] } })
+  await v.type({ label: '운영 루트' }, 'webapps', { replace: true })
+  await v.press({ text: '설정 저장' })
+  assert.ok(v.find({ text: /운영 루트가 잘못됨/ }), JSON.stringify(v.summary()))
+  assert.equal(v.valueOf({ label: '운영 루트' }), 'webapps')
+  assert.equal(v.find({ text: '설정 저장' })!.disabled, false)
+  assert.ok(v.find({ text: /저장하지 않은 변경이 있음 — 설정 저장 후 확인/ }))
+  assert.equal(v.find({ text: '저장함' }), null)
+  await v.unmount()
+})
+
+test('늦게 온 접속 정보 응답은 그 사이 고친 칸을 되돌리지 않는다', slow, async () => {
+  const creds = gate<{ user: string }>()
+  const v = await editor({ 'creds.set': creds.handler })
   await v.type({ label: '비밀번호' }, 'pw')
   const saving = v.press({ text: '접속 정보 저장' })
-  await tick()
+  await creds.entered
   // type 은 여러 걸음이라 응답을 기다리게 된다. 한 번에 끝나는 스위치로 칸을 고친다.
   const editing = v.toggle({ label: '패시브 모드' })
-  await tick()
-  assert.equal(v.valueOf({ label: '패시브 모드' }), false)
+  await until(() => v.valueOf({ label: '패시브 모드' }) === false, '패시브 모드 끔')
   creds.resolve({ user: 'ftpuser' })
   await Promise.all([saving, editing])
   await v.settled()
@@ -421,27 +515,37 @@ test('늦게 온 접속 정보 응답은 그 사이 고친 칸을 되돌리지 �
   await v.unmount()
 })
 
-test('옛 설정 확인의 결과가 늦게 와도 새로 시작한 확인을 덮지 않는다', async () => {
-  const first = deferred<{ view: unknown; log: string[] }>()
+test('옛 설정 확인의 결과가 늦게 와도 새로 시작한 확인을 덮지 않는다', slow, async () => {
+  const first = gate<{ view: unknown; log: string[] }>()
   let gets = 0
   let jobsStarted = 0
   const v = await editor({
     'job.start': () => ({ jobId: `j${++jobsStarted}` }),
-    'run.get': () => (gets++ === 0 ? first.promise : { view: checkedView(), log: [] })
+    'run.get': () => (gets++ === 0 ? first.handler() : { view: checkedView(), log: [] })
   })
   await v.press({ text: '설정 확인 (abc1234)' })
-  const finishing = v.post('job.changed', {
-    id: 'j1', step: 'plan', target: 'myapp', run: 'myapp-20261106-180000-abcdef12', spec: 'abc1234',
-    state: 'done', message: null, progress: null, lines: [], startedAt: Date.now(), endedAt: Date.now(), pid: 1
-  })
-  await tick()
+  const finishing = v.post('job.changed', doneJob('j1'))
+  await first.entered
   // j1 의 결과를 받기 전에 확인을 다시 시작한다
   const again = v.press({ text: '설정 확인 (abc1234)' })
-  await tick()
-  assert.equal(jobsStarted, 2)
+  await until(() => jobsStarted === 2, '두 번째 확인 시작')
   first.resolve({ view: checkedView(), log: [] })
   await Promise.all([finishing, again])
   await v.settled()
   assert.equal(v.find({ text: /맞음: 1개 파일/ }), null, '옛 작업(j1)의 결과가 새 확인(j2) 자리에 보이면 안 된다')
+  await v.unmount()
+})
+
+test('대상을 지우지 못하면 편집기를 닫지 않는다 — 저장하지 않은 변경이 사라지지 않게', slow, async () => {
+  const v = await editor({
+    'target.delete': () => {
+      throw new Error('지우지 못함')
+    }
+  })
+  await v.toggle({ label: '패시브 모드' })
+  await v.press({ text: '대상 삭제' })
+  assert.equal(v.valueOf({ label: '패시브 모드' }), false, JSON.stringify(v.summary()))
+  assert.equal(v.find({ text: '설정 저장' })!.disabled, false)
+  assert.equal(v.find({ text: /대상을 고르거나 새로 만드세요/ }), null)
   await v.unmount()
 })
