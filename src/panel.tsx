@@ -77,7 +77,18 @@ const showHidden = atom(false)
 const runsNotice = atom<string | null>(null)
 
 // 대상 설정 편집
-const editing = atom<{ draft: Target; previousId: string | null; credUser: string | null; netrc: boolean } | null>(null)
+/**
+ * saved: 마지막으로 불러오거나 저장한 설정(글자). draft 가 이것과 다르면 저장하지 않은 변경이 있는 것이다.
+ * session: 편집기를 열 때마다 바뀌는 번호. 늦게 온 응답이 그 사이 연 다른 대상(또는 닫은 편집기)을 덮지 않게 한다.
+ */
+type Editing = { session: number; draft: Target; saved: string; previousId: string | null; credUser: string | null; netrc: boolean }
+const editing = atom<Editing | null>(null)
+let editSession = 0
+const sameSession = (session: number): boolean => read(editing)?.session === session
+const snapshot = (t: Target): string => JSON.stringify(t)
+const isDirty = (e: { draft: Target; saved: string }): boolean => snapshot(e.draft) !== e.saved
+/** 설정 저장·접속 정보 저장·설정 확인 시작 요청이 가는 중. 응답 순서가 뒤섞이지 않게 그동안 이 버튼들을 막는다. */
+const editBusy = atom(false)
 const editErrors = atom<string[]>([])
 const editNotice = atom<string | null>(null)
 const cred = atom({ user: '', password: '' })
@@ -86,7 +97,8 @@ const mapSel = atom<string | null>(null)
 const ruleForm = atom({ pattern: '', reason: '' })
 const ruleSel = atom<string | null>(null)
 /** "설정 확인"으로 띄운 plan 작업. */
-const configCheck = atom<{ jobId: string; target: string; result: string | null; ok: boolean | null } | null>(null)
+/** config: 설정 확인을 시작할 때의 저장된 설정. 결과는 화면의 설정이 이것과 같을 때만 보여 준다. */
+const configCheck = atom<{ jobId: string; target: string; config: string; result: string | null; ok: boolean | null } | null>(null)
 
 const STEP_LABEL: Record<JobStep, string> = {
   check: '준비 확인',
@@ -331,29 +343,41 @@ async function editTarget(id: string | null): Promise<void> {
   set(mapSel, null)
   set(ruleSel, null)
   set(configCheck, null)
-  if (!id) return set(editing, { draft: blankTarget(), previousId: null, credUser: null, netrc: false })
+  const session = ++editSession
+  if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false })
   const d: TargetDetail | null = await ask(() => plugin.request('target.get', { id }))
-  if (d) {
-    set(editing, { draft: d.target, previousId: id, credUser: d.credUser, netrc: d.netrc })
+  // 기다리는 사이 다른 대상을 골랐으면 이 응답은 버린다.
+  if (d && editSession === session) {
+    set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc })
     set(cred, { user: d.credUser ?? '', password: '' })
   }
 }
 
 function patch(fn: (t: Target) => Target): void {
   update(editing, (e) => (e ? { ...e, draft: fn(e.draft) } : e))
+  // 칸을 고치면 "저장함" 은 더는 맞는 말이 아니다.
+  set(editNotice, null)
 }
 
 async function saveEdit(): Promise<void> {
   act()
   const e = read(editing)
-  if (!e) return
-  const r = await ask(() => plugin.request('target.save', plain({ target: e.draft, previousId: e.previousId })))
+  if (!e || read(editBusy)) return
+  set(editBusy, true)
+  const r = await ask(() => plugin.request('target.save', plain({ target: e.draft, previousId: e.previousId }))).finally(() => set(editBusy, false))
   if (!r) return
-  set(editErrors, r.errors)
+  // 응답을 기다리는 사이 편집기가 다른 대상으로 넘어갔거나 닫혔으면, 그 편집 상태는 건드리지 않는다.
+  const here = sameSession(e.session)
+  if (here) set(editErrors, r.errors)
   if (r.errors.length) return
-  set(editNotice, '저장함')
-  set(editing, { ...e, previousId: e.draft.id })
-  // 설정이 바뀌면 그 대상의 준비 확인·plan 을 버린다.
+  if (here) {
+    const now = read(editing)!
+    // 기다리는 사이 칸을 더 고쳤으면 그 변경은 저장되지 않은 것으로 남긴다. 이름은 저장하면 잠기므로 저장된 이름으로 돌린다.
+    const next: Editing = { ...now, draft: { ...now.draft, id: e.draft.id }, saved: snapshot(e.draft), previousId: e.draft.id }
+    set(editing, next)
+    set(editNotice, isDirty(next) ? null : '저장함')
+  }
+  // 저장은 이미 됐다: 편집기가 어디에 있든 그 대상의 준비 확인·plan 은 버리고 목록을 다시 읽는다.
   if (read(targetId) === e.draft.id || read(targetId) === e.previousId) chooseTarget(e.draft.id, true)
   await loadTargets()
 }
@@ -363,7 +387,7 @@ async function deleteEdit(): Promise<void> {
   const e = read(editing)
   if (!e?.previousId) return
   await ask(() => plugin.request('target.delete', { id: e.previousId! }))
-  set(editing, null)
+  if (sameSession(e.session)) set(editing, null)
   await loadTargets()
 }
 
@@ -371,34 +395,42 @@ async function saveCred(): Promise<void> {
   act()
   const e = read(editing)
   const c = read(cred)
-  if (!e?.previousId || !c.user.trim()) return
-  const r = await ask(() => plugin.request('creds.set', { id: e.previousId!, user: c.user, password: c.password }))
-  if (r) {
-    set(editing, { ...e, credUser: r.user })
-    set(cred, { user: r.user, password: '' })
-    set(editNotice, `접속 정보 저장함 (사용자 ${r.user})`)
-  }
+  if (!e?.previousId || !c.user.trim() || read(editBusy)) return
+  set(editBusy, true)
+  const r = await ask(() => plugin.request('creds.set', { id: e.previousId!, user: c.user, password: c.password })).finally(() => set(editBusy, false))
+  if (!r || !sameSession(e.session)) return
+  // 기다리는 사이 고친 칸은 그대로 두고, 저장된 사용자 이름만 바꾼다.
+  update(editing, (now) => (now ? { ...now, credUser: r.user } : now))
+  set(cred, { user: r.user, password: '' })
+  set(editNotice, `접속 정보 저장함 (사용자 ${r.user})`)
 }
 
 async function startConfigCheck(): Promise<void> {
   act()
   const e = read(editing)
-  if (!e?.previousId || !e.draft.checkCommit) return
+  // 워커는 저장된 설정으로 확인한다. 화면에 저장하지 않은 변경이 있으면 보이는 설정과 확인한 설정이 달라진다.
+  if (!e?.previousId || !e.draft.checkCommit || isDirty(e) || read(editBusy)) return
   const target = e.previousId
-  const r = await ask(() => plugin.request('job.start', { step: 'plan', target, spec: e.draft.checkCommit!, purpose: 'configCheck' }))
-  if (r) set(configCheck, { jobId: r.jobId, target, result: null, ok: null })
+  const config = e.saved
+  set(editBusy, true)
+  const r = await ask(() => plugin.request('job.start', { step: 'plan', target, spec: e.draft.checkCommit!, purpose: 'configCheck' })).finally(() => set(editBusy, false))
+  // 다른 대상으로 넘어갔으면 그 작업은 이 편집기의 확인이 아니다(작업 자체는 끝까지 돈다).
+  if (r && sameSession(e.session)) set(configCheck, { jobId: r.jobId, target, config, result: null, ok: null })
 }
 
 /** 확인용 커밋 plan: 모든 파일이 "이미 반영됨"이어야 하고, 운영에 없는 경로(새 파일)가 없어야 한다. */
 async function finishConfigCheck(job: Job): Promise<void> {
+  const cc = read(configCheck)
+  if (!cc || cc.jobId !== job.id) return
   if (!job.run) {
-    set(configCheck, { jobId: job.id, target: job.target, ok: false, result: job.message ?? '준비 확인 실패' })
+    set(configCheck, { ...cc, ok: false, result: job.message ?? '준비 확인 실패' })
     return
   }
   const d = await ask(() => plugin.request('run.get', { id: job.run! }))
-  if (!d) return
+  // 기다리는 사이 확인을 새로 시작했거나 편집기를 바꿨으면, 이 옛 작업의 결과는 버린다.
+  if (!d || read(configCheck)?.jobId !== job.id) return
   const { ok, lines } = configVerdict(d.view)
-  set(configCheck, { jobId: job.id, target: job.target, ok, result: lines.join('\n') })
+  set(configCheck, { ...cc, ok, result: lines.join('\n') })
 }
 
 // ── 시작 ──────────────────────────────────────────────────────
@@ -998,6 +1030,11 @@ function TargetEditor() {
   const r = read(ruleForm)
   const cc = read(configCheck)
   const ccJob = cc ? read(jobs)[cc.jobId] : null
+  const dirty = isDirty(e)
+  const busyEdit = read(editBusy)
+  const ccRunning = !!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting')
+  // 확인 결과는 화면의 설정이 확인한 그 설정일 때만 맞는 말이다.
+  const ccCurrent = !!cc && !dirty && cc.config === e.saved
   return (
     <Stack gap="md">
       {errors.length > 0 && (
@@ -1072,7 +1109,7 @@ function TargetEditor() {
               <Input label="비밀번호" type="password" value={read(cred).password} onChange={(v) => set(cred, { ...read(cred), password: v })} />
             </Box>
             <Box direction="row" justify="end">
-              <Button icon="check" size="sm" disabled={!read(cred).user.trim() || !read(cred).password} onPress={saveCred}>
+              <Button icon="check" size="sm" disabled={!read(cred).user.trim() || !read(cred).password || busyEdit} onPress={saveCred}>
                 접속 정보 저장
               </Button>
             </Box>
@@ -1239,8 +1276,13 @@ function TargetEditor() {
         </Stack>
       </Card>
 
+      {dirty && e.previousId && (
+        <Text size="xs" muted>
+          저장하지 않은 변경이 있습니다. 설정 확인과 반영은 저장된 설정으로 합니다.
+        </Text>
+      )}
       <Box direction="row" gap="xs" justify="between" align="center">
-        <Button icon="check" onPress={saveEdit}>
+        <Button icon="check" disabled={busyEdit} onPress={saveEdit}>
           설정 저장
         </Button>
         {e.previousId && (
@@ -1253,14 +1295,19 @@ function TargetEditor() {
       {e.previousId && (
         <Card title="설정 확인" description="확인용 커밋으로 plan 을 돌려, 모든 파일이 운영에 이미 반영된 것으로 나오는지 봅니다(운영 읽기만).">
           <Stack gap="sm">
-            <Button icon="play" variant="outline" disabled={!t.checkCommit || (!!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting'))} onPress={startConfigCheck}>
-              {t.checkCommit ? `설정 확인 (${t.checkCommit})` : '확인용 커밋을 먼저 저장하세요'}
+            <Button icon="play" variant="outline" disabled={!t.checkCommit || dirty || ccRunning || busyEdit} onPress={startConfigCheck}>
+              {dirty ? '저장하지 않은 변경이 있음 — 설정 저장 후 확인' : t.checkCommit ? `설정 확인 (${t.checkCommit})` : '확인용 커밋을 먼저 저장하세요'}
             </Button>
             {ccJob && !cc?.result && <JobProgress job={ccJob} />}
-            {cc?.result && (
+            {cc?.result && ccCurrent && (
               <Callout tone={cc.ok ? 'success' : 'danger'} icon={cc.ok ? 'check' : 'error'}>
                 <Code block>{cc.result}</Code>
               </Callout>
+            )}
+            {cc?.result && !ccCurrent && (
+              <Text size="xs" muted>
+                설정이 바뀌어서 앞의 확인 결과는 보여 주지 않습니다. 저장한 뒤 다시 확인하세요.
+              </Text>
             )}
           </Stack>
         </Card>
