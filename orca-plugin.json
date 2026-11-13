@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "prod-deploy",
   "name": "운영 반영",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "바뀐 파일을 대상(업체) 운영 서버에 FTP로 반영한다: 준비 확인 → plan → 백업 → 업로드 → 대조, 되돌리기.",
   "engines": {
     "orca": ">=1.4.248"
