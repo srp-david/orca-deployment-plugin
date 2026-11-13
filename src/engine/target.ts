@@ -77,28 +77,50 @@ export function gitRemote(t: Target): string {
   return t.gitRemote || 'origin'
 }
 
-/** 글롭 → 정규식. `**` 는 `/` 를 넘고, `*`·`?` 는 넘지 않는다. */
-export function globToRegExp(glob: string): RegExp {
-  let re = ''
+/**
+ * 글롭이 경로 전체와 맞는가. `**` 는 `/` 를 넘고, `*`·`?` 는 넘지 않는다. `**` 뒤에 `/` 가 오면 폴더가 0개여도 맞는다.
+ * 정규식으로 바꾸지 않는다: `*a*a*a…` 같은 패턴은 정규식에서 걸리는 시간이 폭증한다. 여기서는 패턴 길이 × 경로 길이만큼만 본다.
+ */
+export function globMatch(glob: string, path: string): boolean {
   const g = glob.replace(/\\/g, '/')
+  const n = path.length
+  // ok[j]: 지금까지의 패턴이 경로의 앞 j 글자와 맞는가.
+  let ok = new Array<boolean>(n + 1).fill(false)
+  ok[0] = true
   for (let i = 0; i < g.length; i++) {
     const c = g[i]
-    if (c === '*') {
-      if (g[i + 1] === '*') {
-        i++
-        if (g[i + 1] === '/') {
-          i++
-          re += '(?:.*/)?'
-        } else re += '.*'
-      } else re += '[^/]*'
-    } else if (c === '?') re += '[^/]'
-    else re += c.replace(/[.+^${}()|[\]]/g, '\\$&')
+    const next = new Array<boolean>(n + 1).fill(false)
+    if (c === '*' && g[i + 1] === '*' && g[i + 2] === '/') {
+      // `**` + `/`: 아무것도 없거나, `/` 로 끝나는 아무 글자들
+      i += 2
+      let before = false
+      for (let j = 0; j <= n; j++) {
+        next[j] = ok[j] || (before && path[j - 1] === '/')
+        before = before || ok[j]
+      }
+    } else if (c === '*' && g[i + 1] === '*') {
+      // `**`: 아무 글자들(`/` 포함)
+      i++
+      let any = false
+      for (let j = 0; j <= n; j++) {
+        any = any || ok[j]
+        next[j] = any
+      }
+    } else if (c === '*') {
+      // `*`: `/` 가 아닌 글자들
+      for (let j = 0; j <= n; j++) next[j] = ok[j] || (j > 0 && next[j - 1] && path[j - 1] !== '/')
+    } else if (c === '?') {
+      for (let j = 0; j < n; j++) next[j + 1] = ok[j] && path[j] !== '/'
+    } else {
+      for (let j = 0; j < n; j++) next[j + 1] = ok[j] && path[j] === c
+    }
+    ok = next
   }
-  return new RegExp(`^${re}$`)
+  return ok[n]
 }
 
 export function manualReason(t: Target, path: string): string | null {
-  for (const r of t.manual) if (globToRegExp(r.pattern).test(path)) return r.reason
+  for (const r of t.manual) if (globMatch(r.pattern, path)) return r.reason
   return null
 }
 
@@ -130,43 +152,65 @@ export function inAnyMapping(t: Target, path: string): boolean {
 
 const ID = /^[a-z0-9_]+$/
 
+/** 서버 이름·IPv4 주소: 글자·숫자·`.`·`-`·`_` 만, 양 끝은 글자나 숫자. */
+const HOST = /^(?=.{1,253}$)[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_])?$/
+
 /** 설정의 잘못을 사람이 읽을 문장으로. 빈 배열이면 쓸 수 있다. */
 export function validateTarget(t: Target): string[] {
   const e: string[] = []
   if (!t || typeof t !== 'object') return ['설정이 비었음']
-  if (!ID.test(t.id ?? '')) e.push('대상 이름은 영문 소문자·숫자·_ 만 (run 이름 앞부분이라 - 는 못 씀)')
-  if (!t.label?.trim()) e.push('표시 이름이 필요함')
-  if (!t.repo?.trim()) e.push('메인 체크아웃 경로가 필요함')
-  if (!t.runs?.trim()) e.push('run 기록 폴더가 필요함')
+  // 파일을 손으로 고치거나 밖에서 받은 설정도 여기를 지난다: 칸의 형식부터 확인한다(글자가 아닌 값에 걸려 넘어지지 않게).
+  const filled = (v: unknown): v is string => typeof v === 'string' && v.trim() !== ''
+  const dotDot = (p: string) => /(^|[\\/])\.\.([\\/]|$)/.test(p)
+  const absolute = (p: string) => /^[a-zA-Z]:|^[\\/]/.test(p)
+  if (typeof t.id !== 'string' || !ID.test(t.id)) e.push('대상 이름은 영문 소문자·숫자·_ 만 (run 이름 앞부분이라 - 는 못 씀)')
+  if (!filled(t.label)) e.push('표시 이름이 필요함')
+  if (!filled(t.repo)) e.push('메인 체크아웃 경로가 필요함')
+  if (!filled(t.runs)) e.push('run 기록 폴더가 필요함')
   const c = t.connection
-  if (!c) e.push('연결 설정이 필요함')
+  if (!c || typeof c !== 'object') e.push('연결 설정이 필요함')
   else {
     if (c.protocol !== 'ftp') e.push('연결 종류는 지금 ftp 만 됨')
-    if (!c.host?.trim() || /[\/\s]/.test(c.host)) e.push('호스트는 주소만 (예: ftp.example.com)')
+    // 호스트는 ftp:// 뒤에 그대로 붙는다. 계정(user:pass@)·포트(:21)·경로·?·# 이 섞이면 접속하는 곳이 달라지고,
+    // 계정이 설정 파일과 내보낸 글자에 남는다. 이름이나 IPv4 주소만 받는다(IPv6 는 지원하지 않음).
+    if (!filled(c.host) || !HOST.test(c.host)) e.push('호스트는 서버 이름이나 IP 주소만 (예: ftp.example.com) — 계정·포트·경로는 넣지 않음')
     if (c.port !== undefined && !(Number.isInteger(c.port) && c.port > 0 && c.port < 65536)) e.push('포트가 잘못됨')
-    if (!c.root?.startsWith('/')) e.push('운영 루트는 / 로 시작해야 함')
+    if (typeof c.root !== 'string' || !c.root.startsWith('/')) e.push('운영 루트는 / 로 시작해야 함')
+    else if (dotDot(c.root)) e.push('운영 루트에 .. 은 못 씀')
   }
   if (!Array.isArray(t.mappings) || t.mappings.length === 0) e.push('경로 매핑이 하나 이상 필요함')
   const seen = new Set<string>()
-  for (const [i, m] of (t.mappings ?? []).entries()) {
+  let mappingsOk = Array.isArray(t.mappings)
+  for (const [i, m] of (Array.isArray(t.mappings) ? t.mappings : []).entries()) {
     const n = `매핑 ${i + 1}`
+    if (!m || typeof m.local !== 'string' || typeof m.remote !== 'string') {
+      e.push(`${n}: 로컬 경로와 운영 경로가 필요함`)
+      mappingsOk = false
+      continue
+    }
     if (/[*?[\]]/.test(m.local + m.remote)) e.push(`${n}: 매핑은 폴더 경로만 (패턴은 손 처리 규칙에)`)
-    if (/(^|\/)\.\.(\/|$)/.test(m.local + '/' + m.remote)) e.push(`${n}: .. 은 못 씀`)
-    if (/^[a-zA-Z]:|^\//.test(m.local)) e.push(`${n}: 로컬 경로는 저장소 기준 상대경로`)
-    if (!m.remote?.startsWith('/')) e.push(`${n}: 운영 경로는 / 로 시작 (운영 루트 기준)`)
+    if (dotDot(m.local) || dotDot(m.remote)) e.push(`${n}: .. 은 못 씀`)
+    if (absolute(m.local)) e.push(`${n}: 로컬 경로는 저장소 기준 상대경로`)
+    if (!m.remote.startsWith('/')) e.push(`${n}: 운영 경로는 / 로 시작 (운영 루트 기준)`)
     const k = cleanLocal(m.local)
     if (seen.has(k)) e.push(`${n}: 같은 로컬 경로가 두 번 있음`)
     seen.add(k)
   }
   if (t.java) {
-    if (!t.java.source?.trim() || !t.java.output?.trim()) e.push('Java 빌드 출력: 소스·결과 폴더가 필요함')
-    if (!Number.isInteger(t.java.major) || t.java.major < 45) e.push('Java 빌드 출력: class major 버전이 잘못됨 (Java 8 = 52)')
-    else if (!findMapping(t, cleanLocal(t.java.output) + '/x.class'))
-      e.push('Java 빌드 결과 폴더를 운영에 잇는 경로 매핑이 없음')
+    const j = t.java
+    if (!filled(j.source) || !filled(j.output)) e.push('Java 빌드 출력: 소스·결과 폴더가 필요함')
+    else {
+      if (absolute(j.source) || absolute(j.output)) e.push('Java 빌드 출력: 소스·결과 폴더는 저장소 기준 상대경로')
+      if (dotDot(j.source) || dotDot(j.output)) e.push('Java 빌드 출력: .. 은 못 씀')
+      if (!Number.isInteger(j.major) || j.major < 45) e.push('Java 빌드 출력: class major 버전이 잘못됨 (Java 8 = 52)')
+      else if (mappingsOk && !findMapping(t, cleanLocal(j.output) + '/x.class'))
+        e.push('Java 빌드 결과 폴더를 운영에 잇는 경로 매핑이 없음')
+    }
   }
-  for (const [i, r] of (t.manual ?? []).entries()) {
-    if (!r.pattern?.trim()) e.push(`손 처리 규칙 ${i + 1}: 패턴이 비었음`)
-    if (!r.reason?.trim()) e.push(`손 처리 규칙 ${i + 1}: 이유가 비었음`)
+  if (t.manual !== undefined && !Array.isArray(t.manual)) e.push('손 처리 규칙의 형식이 틀림')
+  for (const [i, r] of (Array.isArray(t.manual) ? t.manual : []).entries()) {
+    if (!filled(r?.pattern)) e.push(`손 처리 규칙 ${i + 1}: 패턴이 비었음`)
+    if (!filled(r?.reason)) e.push(`손 처리 규칙 ${i + 1}: 이유가 비었음`)
   }
   return e
 }

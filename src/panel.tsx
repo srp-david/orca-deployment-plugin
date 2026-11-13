@@ -92,6 +92,12 @@ const snapshot = (t: Target): string => JSON.stringify(t)
 const isDirty = (e: { draft: Target; saved: string }): boolean => snapshot(e.draft) !== e.saved
 /** 설정 저장·접속 정보 저장·설정 확인 시작 요청이 가는 중. 응답 순서가 뒤섞이지 않게 그동안 이 버튼들을 막는다. */
 const editBusy = atom(false)
+/** 받은 설정 가져오기: 붙여 넣은 글자와 그 글자의 잘못. null 이면 가져오기 칸을 보이지 않는다. */
+const importing = atom<{ text: string; errors: string[] } | null>(null)
+/** 가져온 초안을 열었을 때, 받은 사람이 확인할 것. */
+const importNotes = atom<string[]>([])
+/** 내보낸 글자. 설정이 바뀌면 지운다(옛 설정의 글자를 보내지 않게). */
+const exported = atom<string | null>(null)
 const editErrors = atom<string[]>([])
 const editNotice = atom<string | null>(null)
 const cred = atom({ user: '', password: '' })
@@ -338,16 +344,36 @@ function blankTarget(): Target {
   }
 }
 
-async function editTarget(id: string | null): Promise<void> {
-  act()
+/** 편집기를 새로 열 준비: 앞 대상에 붙어 있던 것들을 지우고 새 세션 번호를 준다. */
+function newEditSession(): number {
   set(editErrors, [])
   set(editNotice, null)
   set(cred, { user: '', password: '' })
   set(mapSel, null)
   set(ruleSel, null)
   set(configCheck, null)
-  const session = ++editSession
+  closeImport()
+  set(importNotes, [])
+  set(exported, null)
   set(editLoading, null)
+  return ++editSession
+}
+
+/** 가져오기 칸을 열거나 닫을 때마다 바뀌는 번호: 닫은 뒤(또는 닫고 다시 연 뒤)에 온 앞 요청의 응답을 받지 않는다. */
+let importGen = 0
+function openImport(): void {
+  act()
+  importGen++
+  set(importing, { text: '', errors: [] })
+}
+function closeImport(): void {
+  importGen++
+  set(importing, null)
+}
+
+async function editTarget(id: string | null): Promise<void> {
+  act()
+  const session = newEditSession()
   if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false })
   // 앞 편집기는 여기서 닫는다: 불러오는 동안 앞 대상의 응답·동작이 끼어들 자리를 없앤다.
   set(editing, null)
@@ -364,8 +390,38 @@ async function editTarget(id: string | null): Promise<void> {
 
 function patch(fn: (t: Target) => Target): void {
   update(editing, (e) => (e ? { ...e, draft: fn(e.draft) } : e))
-  // 칸을 고치면 "저장함" 은 더는 맞는 말이 아니다.
+  // 칸을 고치면 "저장함" 은 더는 맞는 말이 아니고, 내보낸 글자도 화면의 설정과 달라진다.
   set(editNotice, null)
+  set(exported, null)
+}
+
+/** 받은 글자를 워커에서 검사해 새 대상의 초안으로 연다. 저장은 사람이 내용을 보고 누른다. */
+async function importTarget(): Promise<void> {
+  act()
+  const im = read(importing)
+  if (!im || !im.text.trim() || read(editBusy)) return
+  const gen = importGen
+  set(editBusy, true)
+  const r = await ask(() => plugin.request('target.import', { text: im.text })).finally(() => set(editBusy, false))
+  // 기다리는 사이 가져오기를 닫았거나(닫고 다시 열었거나) 다른 대상을 열었으면 이 응답은 버린다.
+  // 요청이 가는 동안 글자 칸은 잠기지만, 그래도 보낸 글자와 지금 글자가 같을 때만 받는다.
+  const now = read(importing)
+  if (!r || importGen !== gen || !now || now.text !== im.text) return
+  if (!r.draft) return set(importing, { text: now.text, errors: r.errors })
+  const session = newEditSession()
+  set(editing, { session, draft: r.draft, saved: '', previousId: null, credUser: null, netrc: false })
+  set(importNotes, r.notes)
+}
+
+/** 저장된 설정에서 팀이 같이 쓰는 것만 글자로 받는다. */
+async function exportEdit(): Promise<void> {
+  act()
+  const e = read(editing)
+  if (!e?.previousId || isDirty(e) || read(editBusy)) return
+  set(editBusy, true)
+  const r = await ask(() => plugin.request('target.export', { id: e.previousId! })).finally(() => set(editBusy, false))
+  const now = read(editing)
+  if (r && now && sameSession(e.session) && !isDirty(now)) set(exported, r.text)
 }
 
 async function saveEdit(): Promise<void> {
@@ -384,7 +440,11 @@ async function saveEdit(): Promise<void> {
     // 기다리는 사이 칸을 더 고쳤으면 그 변경은 저장되지 않은 것으로 남긴다. 이름은 저장하면 잠기므로 저장된 이름으로 돌린다.
     const next: Editing = { ...now, draft: { ...now.draft, id: e.draft.id }, saved: snapshot(e.draft), previousId: e.draft.id }
     set(editing, next)
-    set(editNotice, isDirty(next) ? null : '저장함')
+    // 처음 저장한 대상은 접속 정보 칸이 이제야 보인다: 다음에 할 일을 알려 준다.
+    const first = e.previousId === null ? '저장함 — 다음: 아래 접속 정보(FTP 계정)를 저장한 뒤 설정 확인을 누르세요' : '저장함'
+    set(editNotice, isDirty(next) ? null : first)
+    set(importNotes, [])
+    set(exported, null)
   }
   // 저장은 이미 됐다: 편집기가 어디에 있든 그 대상의 준비 확인·plan 은 버리고 목록을 다시 읽는다.
   if (read(targetId) === e.draft.id || read(targetId) === e.previousId) chooseTarget(e.draft.id, true)
@@ -1022,25 +1082,77 @@ function TextField(props: { label: string; value: string; onChange: (v: string) 
 function TargetsTab() {
   const e = read(editing)
   const loading = read(editLoading)
+  const im = read(importing)
   const list = read(targets)
   return (
     <Stack gap="md">
-      <Box direction="row" gap="xs" align="end">
-        <Box grow>
-          <Select
-            label="고칠 대상"
-            value={loading ?? e?.previousId ?? ''}
-            placeholder="대상 고르기"
-            options={list.map((t) => ({ value: t.id, label: t.label }))}
-            onChange={(v) => void editTarget(v)}
-          />
-        </Box>
+      <Select
+        label="고칠 대상"
+        value={loading ?? e?.previousId ?? ''}
+        placeholder="대상 고르기"
+        options={list.map((t) => ({ value: t.id, label: t.label }))}
+        onChange={(v) => void editTarget(v)}
+      />
+      <Row gap="xs" wrap>
+        <Button
+          icon="download"
+          variant="outline"
+          onPress={openImport}
+        >
+          받은 설정 가져오기
+        </Button>
         <Button icon="add" variant="outline" onPress={() => editTarget(null)}>
           새 대상
         </Button>
-      </Box>
-      {e ? <TargetEditor /> : loading ? <Spinner label="대상 설정 불러오는 중" /> : <Text muted>대상을 고르거나 새로 만드세요.</Text>}
+      </Row>
+      {im ? (
+        <ImportCard />
+      ) : e ? (
+        <TargetEditor />
+      ) : loading ? (
+        <Spinner label="대상 설정 불러오는 중" />
+      ) : (
+        <Text muted>대상을 고르거나, 받은 설정을 가져오거나, 새로 만드세요.</Text>
+      )}
     </Stack>
+  )
+}
+
+/** 대상을 이미 쓰는 사람이 내보낸 글자를 붙여 넣는 칸. 불러와도 저장하기 전에는 아무것도 바뀌지 않는다. */
+function ImportCard() {
+  const im = read(importing)!
+  return (
+    <Card title="받은 설정 가져오기" description="이 대상을 이미 쓰는 사람이 '내보내기'로 만든 글자를 붙여 넣습니다. 새 대상으로 열리고, 저장하기 전에는 아무것도 바뀌지 않습니다.">
+      <Stack gap="sm">
+        <Textarea
+          label="받은 글자"
+          rows={8}
+          value={im.text}
+          disabled={read(editBusy)}
+          placeholder={'{ "format": "orca-prod-deploy-target", … }'}
+          onChange={(v) => set(importing, { text: v, errors: [] })}
+        />
+        {im.errors.length > 0 && (
+          <Callout tone="danger" title="가져오지 않음" icon="error">
+            <Stack gap="xs">
+              {im.errors.map((x, i) => (
+                <Text key={`ie${i}`} size="xs">
+                  {`· ${x}`}
+                </Text>
+              ))}
+            </Stack>
+          </Callout>
+        )}
+        <Row gap="xs">
+          <Button icon="check" disabled={!im.text.trim() || read(editBusy)} onPress={importTarget}>
+            불러오기
+          </Button>
+          <Button variant="ghost" onPress={closeImport}>
+            취소
+          </Button>
+        </Row>
+      </Stack>
+    </Card>
   )
 }
 
@@ -1056,6 +1168,8 @@ function TargetEditor() {
   const ccJob = cc ? read(jobs)[cc.jobId] : null
   const dirty = isDirty(e)
   const busyEdit = read(editBusy)
+  const notes = read(importNotes)
+  const shareText = read(exported)
   const ccRunning = !!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting')
   // 확인 결과는 화면의 설정이 확인한 그 설정일 때만 맞는 말이다.
   const ccCurrent = !!cc && !dirty && cc.config === e.saved
@@ -1073,6 +1187,20 @@ function TargetEditor() {
         </Callout>
       )}
       {notice && <Callout tone="success">{notice}</Callout>}
+      {notes.length > 0 && (
+        <Callout tone="accent" title="받은 설정을 불러왔습니다 — 아직 저장 전" icon="info">
+          <Stack gap="xs">
+            {notes.map((x, i) => (
+              <Text key={`in${i}`} size="xs">
+                {`· ${x}`}
+              </Text>
+            ))}
+            <Text size="xs" muted>
+              다음: ① 메인 체크아웃 확인 → ② 맨 아래 설정 저장 → ③ 접속 정보(FTP 계정) 저장 → ④ 설정 확인
+            </Text>
+          </Stack>
+        </Callout>
+      )}
 
       <Card title="대상" description="저장소와 run 기록 위치">
         <Stack gap="md">
@@ -1332,6 +1460,27 @@ function TargetEditor() {
               <Text size="xs" muted>
                 설정이 바뀌어서 앞의 확인 결과는 보여 주지 않습니다. 저장한 뒤 다시 확인하세요.
               </Text>
+            )}
+          </Stack>
+        </Card>
+      )}
+
+      {e.previousId && (
+        <Card title="팀원에게 나눠 주기" description="이 대상의 설정을 글자로 내보냅니다. 받은 사람은 '받은 설정 가져오기'에 붙여 넣으면 됩니다.">
+          <Stack gap="sm">
+            <Text size="xs" muted>
+              들어가는 것: FTP 주소·운영 루트·경로 매핑·Java 설정·손 처리 규칙·확인용 커밋·저장소 주소. 들어가지 않는 것: 메인 체크아웃·run 기록 폴더 같은 이 PC 의 경로, FTP 계정과 비밀번호, 빌드 명령.
+            </Text>
+            <Button icon="upload" variant="outline" disabled={dirty || busyEdit} onPress={exportEdit}>
+              {dirty ? '저장하지 않은 변경이 있음 — 설정 저장 후 내보내기' : '내보내기'}
+            </Button>
+            {shareText && (
+              <>
+                <Textarea label="내보낸 글자 (칸을 누르고 Ctrl+A, Ctrl+C 로 복사)" rows={8} value={shareText} onChange={() => {}} />
+                <Callout tone="warning" icon="warning">
+                  FTP 주소·운영 루트·저장소 주소가 들어 있습니다. 사내 채널로만 전달하세요. 저장소 주소(remote)는 주소 앞의 계정만 떼고 나머지는 그대로 넣으니, 보내기 전에 글자를 한 번 읽어 보세요.
+                </Callout>
+              </>
             )}
           </Stack>
         </Card>

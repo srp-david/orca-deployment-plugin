@@ -7,13 +7,15 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { credentialUser, deleteCredential, writeCredential } from './engine/creds.ts'
-import { mergedPrs } from './engine/git.ts'
+import { gitText, mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
 import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
+import { exportChecked, parseShared, repoIdentity, sameRepoIdentity, sharedToTarget } from './engine/share.ts'
 import {
   deleteTarget,
   detectTarget,
+  gitRemote,
   listTargets,
   loadTarget,
   mainBranch,
@@ -23,7 +25,7 @@ import {
   validateTarget,
   type Target
 } from './engine/target.ts'
-import { Stop, toNative } from './engine/util.ts'
+import { exec, home, Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
 import { cliSpawnError } from './cli-spawn.ts'
 import { configVerdict } from './config-verdict.ts'
@@ -257,18 +259,153 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   )
 
+  /** 지금 Orca 에서 보고 있는 작업공간의 이름과 폴더. 폴더를 하나로 정하지 못하면 path 는 null. */
+  async function currentWorkspace(): Promise<{ name: string | null; path: string | null }> {
+    const ctx = await orca.host.call('workspace.readContext').catch(() => null)
+    if (!ctx) return { name: null, path: null }
+    const list = await orca.host.call('workspace.list').catch(() => null)
+    // API 에 공통 id 가 없어 이름·브랜치가 정확히 하나와 맞을 때만 그 경로를 쓴다.
+    const hits = (list?.workspaces ?? []).filter(
+      (w) => isLocal(w) && w.name === ctx.displayName && (w.branch ?? '') === (ctx.branch ?? '')
+    )
+    return { name: ctx.displayName, path: hits.length === 1 ? hits[0].path : null }
+  }
+
+  /** 이 PC 의 작업공간인가(SSH·WSL 같은 다른 호스트의 것은 Windows 쪽 git 으로 다룰 수 없다). */
+  const isLocal = (w: { hostId: string | null }) => !w.hostId || w.hostId === 'local'
+
+  /** 작업공간을 훑을 때 쓰는 git: 폴더 하나가 느리거나 끊겨도(네트워크 드라이브 등) 기다리지 않게 시간을 둔다. */
+  const LOOKUP_MS = 5000
+  const quickGit = async (dir: string, args: string[]): Promise<string | null> => {
+    const r = await exec('git', ['-C', toNative(dir), ...args], { timeoutMs: LOOKUP_MS })
+    return r.code === 0 ? r.out.toString('utf8').trim() : null
+  }
+
+  /**
+   * 폴더의 원격 하나(remote 이름)의 저장소 이름표. 저장소가 아니거나 그 원격이 없거나 이름표로 만들 수 없으면 null.
+   * 설정에 적힌 주소를 그대로 읽는다(url.insteadOf 로 바꿔 쓰는 주소는 풀지 않는다).
+   */
+  async function identityOf(dir: string, remote: string): Promise<string | null> {
+    const out = await quickGit(dir, ['config', '--get-regexp', '^remote\\..*\\.url$'])
+    if (out === null) return null
+    for (const line of out.split('\n')) {
+      const m = /^remote\.(.+)\.url (.+)$/.exec(line.trim())
+      if (m && m[1] === remote) return repoIdentity(m[2])
+    }
+    return null
+  }
+
+  /**
+   * Orca 가 아는 이 PC 의 작업공간 중, 이 이름표의 저장소를 받아 둔 폴더들(저장소 맨 위 폴더와 지금 브랜치).
+   * 받는 쪽의 반영은 origin 을 쓰므로 origin 이 그 저장소인 폴더만 본다(upstream 만 같은 fork 는 뺀다).
+   * partial: 작업공간이 너무 많거나 시간이 모자라 다 보지 못함.
+   */
+  async function checkoutsOf(remote: string): Promise<{ found: { path: string; branch: string }[]; partial: boolean }> {
+    const list = await orca.host.call('workspace.list').catch(() => null)
+    const all = [...new Set((list?.workspaces ?? []).filter(isLocal).map((w) => w.path.replace(/\\/g, '/')))]
+    const paths = all.slice(0, 100)
+    let partial = !!list?.truncated || all.length > paths.length
+    const deadline = Date.now() + 20000
+    const found: { path: string; branch: string }[] = []
+    const seen = new Set<string>()
+    let next = 0
+    // 한꺼번에 git 을 100개 띄우지 않고 몇 개씩 나눠 본다.
+    const worker = async () => {
+      while (next < paths.length) {
+        if (Date.now() > deadline) {
+          partial = true
+          return
+        }
+        const p = paths[next++]
+        const id = await identityOf(p, 'origin')
+        if (!id || !sameRepoIdentity(id, remote)) continue
+        const top = await quickGit(p, ['rev-parse', '--show-toplevel'])
+        if (!top) continue
+        const path = top.replace(/\\/g, '/')
+        if (seen.has(path.toLowerCase())) continue
+        seen.add(path.toLowerCase())
+        found.push({ path, branch: (await quickGit(path, ['rev-parse', '--abbrev-ref', 'HEAD'])) ?? '' })
+      }
+    }
+    await Promise.all(Array.from({ length: 8 }, worker))
+    // 고르는 순서가 실행 때마다 달라지지 않게 경로 순으로 둔다.
+    found.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    return { found, partial }
+  }
+
   orca.panels.handle('workspace.detect', () =>
     guard(async (): Promise<Workspace> => {
-      const ctx = await orca.host.call('workspace.readContext').catch(() => null)
-      if (!ctx) return { target: null, candidates: [], known: false, name: null, path: null }
-      const list = await orca.host.call('workspace.list').catch(() => null)
-      // API 에 공통 id 가 없어 이름·브랜치가 정확히 하나와 맞을 때만 그 경로를 쓴다.
-      const hits = (list?.workspaces ?? []).filter(
-        (w) => !w.hostId && w.name === ctx.displayName && (w.branch ?? '') === (ctx.branch ?? '')
+      const ws = await currentWorkspace()
+      if (!ws.path) return { target: null, candidates: [], known: false, name: ws.name, path: null }
+      const d = await detectTarget(ws.path)
+      return { target: d.target, candidates: d.candidates, known: d.repoKnown, name: ws.name, path: ws.path }
+    })
+  )
+
+  orca.panels.handle('target.export', ({ id }) =>
+    guard(async () => {
+      const t = loadTarget(id)
+      // 저장소 이름표(계정을 뗀 원격 주소)를 같이 넣는다: 받는 쪽이 자기 PC 에서 같은 저장소를 받아 둔 폴더를 찾는다.
+      // 이름표로 만들 수 없는 주소(로컬 경로, file 주소 등)면 넣지 않는다.
+      const remote = repoProblem(t.repo) ? null : await identityOf(t.repo, gitRemote(t))
+      const { text, errors } = exportChecked(t, remote)
+      if (!text) throw new Stop(`이 설정은 내보낼 수 없음 — 받는 쪽에서 거절됩니다. 고친 뒤 다시 내보내세요:\n- ${errors.join('\n- ')}`)
+      return { text }
+    })
+  )
+
+  orca.panels.handle('target.import', ({ text }) =>
+    guard(async () => {
+      const { shared, errors } = parseShared(text)
+      if (!shared) return { errors, draft: null, notes: [] }
+      const notes: string[] = []
+      const branch = shared.mainBranch ?? 'main'
+      // 메인 체크아웃은 제안만 한다. 맞는지는 사람이 보고 저장한다.
+      let repo = ''
+      const offBranch = (now: string) =>
+        `그 폴더는 지금 ${now || '알 수 없는'} 브랜치입니다. 반영은 ${branch} 브랜치에서만 됩니다 — ${branch} 을 받아 둔 폴더가 따로 있으면 그 경로로 고치세요.`
+      if (shared.remote) {
+        // 받은 설정에 저장소 이름표가 있으면, Orca 작업공간 중 그 저장소를 받아 둔 폴더를 찾는다(main 브랜치인 것부터).
+        const { found: all, partial } = await checkoutsOf(shared.remote)
+        const onMain = all.filter((c) => c.branch === branch)
+        const pick = onMain[0] ?? all[0]
+        if (pick) {
+          repo = pick.path
+          notes.push(`메인 체크아웃에 이 대상의 저장소(${shared.remote})를 받아 둔 폴더 ${repo} 를 넣었습니다. 반영에 쓸 폴더가 맞는지 확인하세요.`)
+          if (pick.branch !== branch) notes.push(offBranch(pick.branch))
+          const others = (onMain.length ? onMain : all).filter((c) => c !== pick).map((c) => c.path)
+          if (others.length) notes.push(`같은 저장소를 받아 둔 다른 폴더: ${others.slice(0, 5).join(', ')}`)
+        } else
+          notes.push(
+            `이 대상의 저장소(${shared.remote})를 받아 둔 작업공간을 Orca 에서 찾지 못했습니다(origin 이 이 주소인 폴더). 저장소를 받은 뒤 메인 체크아웃 경로를 직접 넣으세요.`
+          )
+        if (partial) notes.push('작업공간이 많거나 응답이 느려서 일부만 찾아봤습니다. 메인 체크아웃이 맞는지 꼭 확인하세요.')
+      } else {
+        // 이름표가 없는 설정(원격이 없거나, 주소를 이름표로 만들 수 없는 저장소에서 내보낸 것): 지금 보고 있는 작업공간의 저장소를 넣어 본다.
+        const ws = await currentWorkspace()
+        const top = ws.path ? await gitText(ws.path, ['rev-parse', '--show-toplevel']).catch(() => '') : ''
+        if (top) {
+          repo = top.replace(/\\/g, '/')
+          notes.push(`메인 체크아웃에 지금 작업공간의 저장소(${repo})를 넣었습니다. 이 대상의 저장소가 맞는지 확인하세요.`)
+          const now = await gitText(repo, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => '')
+          if (now && now !== branch) notes.push(offBranch(now))
+        } else notes.push('메인 체크아웃 경로를 직접 넣으세요(지금 작업공간에서 저장소를 찾지 못했습니다).')
+      }
+      // run 기록에는 운영 백업이 쌓인다. 저장소 안에 두면 실수로 커밋될 수 있어 기본은 플러그인 데이터 폴더 아래다.
+      const runs = join(home(), 'runs', shared.id).replace(/\\/g, '/')
+      const inside = repo !== '' && (runs.toLowerCase() + '/').startsWith(repo.toLowerCase().replace(/\/+$/, '') + '/')
+      notes.push(
+        inside
+          ? `run 기록 폴더(${runs})가 저장소 안입니다. 운영 파일 백업이 여기에 쌓이니, git 에서 빼 둔 폴더인지 확인하거나 저장소 밖으로 고치세요.`
+          : `run 기록 폴더는 ${runs} 로 넣었습니다. 운영 파일 백업이 여기에 쌓입니다.`
       )
-      if (hits.length !== 1) return { target: null, candidates: [], known: false, name: ctx.displayName, path: null }
-      const d = await detectTarget(hits[0].path)
-      return { target: d.target, candidates: d.candidates, known: d.repoKnown, name: ctx.displayName, path: hits[0].path }
+      if (!shared.checkCommit)
+        notes.push('받은 설정에 확인용 커밋이 없습니다. 설정 확인을 하려면 이미 운영에 반영된 커밋을 넣고 저장하세요.')
+      if (listTargets().some((t) => t.id === shared.id))
+        notes.push(
+          `같은 이름의 대상(${shared.id})이 이미 있습니다. 덮어쓰지 않습니다 — 그 대상을 고쳐 쓰거나, 이름을 바꿔 저장하세요(이름을 바꾸면 run 기록 폴더 끝의 이름도 같이 고치세요).`
+        )
+      return { errors: [], draft: sharedToTarget(shared, repo, runs), notes }
     })
   )
 

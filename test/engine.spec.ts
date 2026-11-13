@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { deployNotes } from '../src/engine/git.ts'
 import { parseSpec } from '../src/engine/plan.ts'
 import { confirmCode } from '../src/engine/runs.ts'
-import { findMapping, globToRegExp, manualReason, remotePathOf, validateTarget, type Target } from '../src/engine/target.ts'
+import { findMapping, globMatch, manualReason, remotePathOf, validateTarget, type Target } from '../src/engine/target.ts'
 import { toMsys, toNative } from '../src/engine/util.ts'
 
 const example = JSON.parse(readFileSync(new URL('../examples/java-war.json', import.meta.url), 'utf8')) as Target
@@ -16,12 +16,57 @@ test('예시 설정은 검사를 통과한다', () => {
 })
 
 test('글롭: ** 는 폴더를 넘고 * 는 넘지 않는다', () => {
-  assert.ok(globToRegExp('src/main/webapp/META-INF/**').test('src/main/webapp/META-INF/a/b.xml'))
-  assert.ok(globToRegExp('a/*.js').test('a/x.js'))
-  assert.ok(!globToRegExp('a/*.js').test('a/b/x.js'))
-  assert.ok(globToRegExp('a/**/x.js').test('a/x.js'))
-  assert.ok(globToRegExp('a/**/x.js').test('a/b/c/x.js'))
-  assert.ok(!globToRegExp('a.b').test('aXb'))
+  assert.ok(globMatch('src/main/webapp/META-INF/**', 'src/main/webapp/META-INF/a/b.xml'))
+  assert.ok(globMatch('a/*.js', 'a/x.js'))
+  assert.ok(!globMatch('a/*.js', 'a/b/x.js'))
+  assert.ok(globMatch('a/**/x.js', 'a/x.js'))
+  assert.ok(globMatch('a/**/x.js', 'a/b/c/x.js'))
+  assert.ok(!globMatch('a.b', 'aXb'))
+  assert.ok(globMatch('a\\b\\*.js', 'a/b/x.js'), '패턴의 역슬래시는 슬래시로 본다')
+  assert.ok(!globMatch('a/?.js', 'a//.js'), '? 는 슬래시와 맞지 않는다')
+})
+
+/** 예전 구현(글롭 → 정규식). 새 구현이 같은 답을 내는지 견주는 데만 쓴다. */
+function oldGlobToRegExp(glob: string): RegExp {
+  let re = ''
+  const g = glob.replace(/\\/g, '/')
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i]
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        i++
+        if (g[i + 1] === '/') {
+          i++
+          re += '(?:.*/)?'
+        } else re += '.*'
+      } else re += '[^/]*'
+    } else if (c === '?') re += '[^/]'
+    else re += c.replace(/[.+^${}()|[\]]/g, '\\$&')
+  }
+  return new RegExp(`^${re}$`)
+}
+
+test('글롭: 새 구현은 예전 정규식 구현과 같은 답을 낸다', () => {
+  const patterns = [
+    '', '*', '**', '**/', '**/*', '*/**', 'a', 'a/*', 'a/**', 'a/**/', 'a/**/b', '**/b', '**/*.xml', '*.xml', 'a/*/c', 'a/?/c',
+    'a/**/c/**/e', 'src/main/webapp/WEB-INF/web.xml', 'src/main/webapp/META-INF/**', 'src/main/resources/**', 'libs/**',
+    'a.b', 'a+b', 'a(b)', 'a[b]', 'a{b}', 'a$b', 'a^b', 'a|b', '***', 'a***b', '**a', 'a**', '*a*', '?', '??', 'a/**b', '**/**/x', '*/*'
+  ]
+  const paths = [
+    '', 'a', 'b', 'a/', '/a', 'a/b', 'a/b/c', 'a/x/c', 'a/c', 'a/b/c/d/e', 'a/c/e', 'x.xml', 'a/x.xml', 'a/b/x.xml', 'a.b', 'aXb', 'a+b',
+    'a(b)', 'a[b]', 'a{b}', 'a$b', 'a^b', 'a|b', 'src/main/webapp/WEB-INF/web.xml', 'src/main/webapp/META-INF/a/b.xml',
+    'src/main/resources/logback.xml', 'libs/x.jar', 'ab', 'aab', 'a/bb', 'x', 'xx', 'x/y', 'x/y/z', 'a//c', 'a/b/'
+  ]
+  for (const p of patterns)
+    for (const s of paths) assert.equal(globMatch(p, s), oldGlobToRegExp(p).test(s), `패턴 ${JSON.stringify(p)} 경로 ${JSON.stringify(s)}`)
+})
+
+test('글롭: 별표가 많이 이어진 패턴도 바로 끝난다 — 정규식에서는 걸리는 시간이 폭증했다', () => {
+  const started = Date.now()
+  assert.equal(globMatch('*a'.repeat(26) + 'b', 'a'.repeat(35) + 'c'), false)
+  assert.equal(globMatch('**/'.repeat(40) + 'x', 'a/'.repeat(60) + 'y'), false)
+  assert.equal(globMatch('*a'.repeat(100), 'a'.repeat(300)), true)
+  assert.ok(Date.now() - started < 500, `${Date.now() - started}ms`)
 })
 
 test('손 처리 규칙: 위에서부터 처음 맞는 규칙', () => {

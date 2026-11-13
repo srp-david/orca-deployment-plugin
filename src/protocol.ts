@@ -73,6 +73,10 @@ declare module 'orca' {
     'target.save': { input: { target: Target; previousId: string | null }; output: { errors: string[] } }
     'target.delete': { input: { id: string }; output: null }
     'target.validate': { input: { target: Target }; output: { errors: string[] } }
+    /** 팀이 같이 쓰는 설정만 담은 글자. 개인 경로·접속 정보·빌드 명령은 들어가지 않는다. */
+    'target.export': { input: { id: string }; output: { text: string } }
+    /** 받은 글자를 검사해 새 대상의 초안을 만든다(저장하지 않는다). notes 는 받은 사람이 확인할 것. */
+    'target.import': { input: { text: string }; output: { errors: string[]; draft: Target | null; notes: string[] } }
     'creds.set': { input: { id: string; user: string; password: string }; output: { user: string } }
     'creds.delete': { input: { id: string }; output: null }
     'workspace.detect': { output: Workspace }

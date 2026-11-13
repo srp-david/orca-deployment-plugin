@@ -549,3 +549,100 @@ test('대상을 지우지 못하면 편집기를 닫지 않는다 — 저장하�
   assert.equal(v.find({ text: /대상을 고르거나 새로 만드세요/ }), null)
   await v.unmount()
 })
+
+// ── 대상 설정: 가져오기·내보내기 ──
+
+test('받은 설정 가져오기: 붙여 넣은 글자를 새 대상으로 열고, 저장은 사람이 누를 때만 한다', slow, async () => {
+  const imports: unknown[] = []
+  const saves: { target: { id: string; repo: string }; previousId: string | null }[] = []
+  const draft = { ...targetA, id: 'newapp', label: 'New App', repo: 'C:/work/repos/new-app', runs: 'C:/Users/me/.prod-deploy/runs/newapp' }
+  const v = await editor({
+    'target.import': (input: unknown) => {
+      imports.push(input)
+      return { errors: [], draft, notes: ['메인 체크아웃에 지금 작업공간의 저장소(C:/work/repos/new-app)를 넣었습니다. 이 대상의 저장소가 맞는지 확인하세요.'] }
+    },
+    'target.save': (input: { target: { id: string; repo: string }; previousId: string | null }) => {
+      saves.push(input)
+      return { errors: [] }
+    }
+  })
+  await v.press({ text: '받은 설정 가져오기' })
+  assert.equal(v.find({ text: '불러오기' })!.disabled, true, '글자를 넣기 전에는 누를 수 없다')
+  await v.type({ label: '받은 글자' }, '{"format":"orca-prod-deploy-target"}')
+  await v.press({ text: '불러오기' })
+  assert.deepEqual(imports, [{ text: '{"format":"orca-prod-deploy-target"}' }])
+  // 새 대상으로 열렸고(이름을 고칠 수 있음), 아직 저장되지 않았다
+  assert.equal(v.valueOf({ label: '이름 (영문 소문자·숫자·_)' }), 'newapp')
+  assert.equal(v.valueOf({ label: '메인 체크아웃' }), 'C:/work/repos/new-app')
+  assert.ok(v.find({ text: /지금 작업공간의 저장소/ }), JSON.stringify(v.summary()))
+  assert.ok(v.find({ text: /① 메인 체크아웃 확인/ }))
+  assert.equal(saves.length, 0)
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0].previousId, null, '새 대상으로 저장한다(있는 대상을 덮어쓰지 않음)')
+  assert.equal(saves[0].target.id, 'newapp')
+  assert.ok(v.find({ text: /저장함 — 다음: 아래 접속 정보/ }), JSON.stringify(v.summary()))
+  assert.equal(v.find({ text: /① 메인 체크아웃 확인/ }), null, '저장한 뒤에는 "아직 저장 전" 안내를 내린다')
+  await v.unmount()
+})
+
+test('받은 설정 가져오기: 글자가 틀리면 이유를 보여 주고 편집기를 열지 않는다', slow, async () => {
+  const v = await editor({ 'target.import': { errors: ['알 수 없는 항목: repo2'], draft: null, notes: [] } })
+  await v.press({ text: '받은 설정 가져오기' })
+  await v.type({ label: '받은 글자' }, '{"x":1}')
+  await v.press({ text: '불러오기' })
+  assert.ok(v.find({ text: /알 수 없는 항목: repo2/ }), JSON.stringify(v.summary()))
+  assert.equal(v.valueOf({ label: '받은 글자' }), '{"x":1}', '붙여 넣은 글자는 그대로 둔다')
+  assert.equal(v.find({ text: '설정 저장' }), null)
+  // 취소하면 가져오기 전의 편집기로 돌아간다
+  await v.press({ text: '취소' })
+  assert.equal(v.valueOf({ label: '표시 이름' }), 'My App')
+  await v.unmount()
+})
+
+test('내보내기: 저장된 설정만 내보내고, 칸을 고치면 내보낸 글자를 지운다', slow, async () => {
+  const exports: unknown[] = []
+  const v = await editor({
+    'target.export': (input: unknown) => {
+      exports.push(input)
+      return { text: '{\n  "format": "orca-prod-deploy-target"\n}' }
+    }
+  })
+  await v.press({ text: '내보내기' })
+  assert.deepEqual(exports, [{ id: 'myapp' }])
+  assert.equal(v.valueOf({ label: /내보낸 글자/ }), '{\n  "format": "orca-prod-deploy-target"\n}')
+  assert.ok(v.find({ text: /사내 채널로만 전달/ }))
+  // 칸을 고치면 화면의 설정과 내보낸 글자가 달라지므로 지우고, 저장 전에는 내보낼 수 없다
+  await v.toggle({ label: '패시브 모드' })
+  assert.equal(v.find({ label: /내보낸 글자/ }), null)
+  const blocked = v.find({ text: /저장하지 않은 변경이 있음 — 설정 저장 후 내보내기/ })
+  assert.ok(blocked, JSON.stringify(v.summary()))
+  assert.equal(blocked!.disabled, true)
+  await v.unmount()
+})
+
+test('가져오기를 닫고 다시 열면, 앞 요청의 늦은 응답은 받지 않는다', slow, async () => {
+  const first = gate<unknown>()
+  const draft = { ...targetA, id: 'newapp', label: 'New App' }
+  const v = await editor({ 'target.import': first.handler })
+  await v.press({ text: '받은 설정 가져오기' })
+  await v.type({ label: '받은 글자' }, 'AAA')
+  const loading = v.press({ text: '불러오기' })
+  await first.entered
+  // 요청이 가는 동안에는 글자 칸이 잠긴다(보낸 글자와 화면의 글자가 달라지지 않게)
+  await until(() => v.find({ label: '받은 글자' })?.disabled === true, '글자 칸 잠김')
+  // 닫고 다시 연다: 새 가져오기다
+  const closing = v.press({ text: '취소' })
+  await until(() => v.find({ label: '받은 글자' }) === null, '가져오기 닫힘')
+  const reopening = v.press({ text: '받은 설정 가져오기' })
+  await until(() => v.find({ label: '받은 글자' }) !== null, '가져오기 다시 열림')
+  first.resolve({ errors: [], draft, notes: ['앞 요청의 안내'] })
+  await Promise.all([loading, closing, reopening])
+  await v.settled()
+  // 앞 요청(AAA)의 초안이 열리면 안 되고, 새로 연 빈 가져오기 칸이 그대로 있어야 한다
+  assert.ok(v.find({ label: '받은 글자' }), JSON.stringify(v.summary()))
+  assert.equal(v.valueOf({ label: '받은 글자' }), '')
+  assert.equal(v.find({ text: /앞 요청의 안내/ }), null)
+  assert.equal(v.find({ text: /아직 저장 전/ }), null)
+  await v.unmount()
+})
