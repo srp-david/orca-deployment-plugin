@@ -753,12 +753,13 @@ test('접속 확인: 누를 때만 접속하고, 결과는 확인한 그 설정�
   assert.ok(v.find({ text: /목록 조회 성공 — 항목 12개/ }), JSON.stringify(v.summary()))
   assert.ok(v.find({ text: /경로 매핑이 맞는지는 설정 확인으로/ }), '접속 확인이 경로 매핑까지 맞다는 뜻으로 읽히지 않게')
   // 설정을 고치면 결과를 내리고, 저장하기 전에는 다시 확인할 수 없다
-  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  await v.toggle({ label: '고급 설정' })
+  await v.toggle({ label: '패시브 모드' })
   assert.equal(v.find({ text: /목록 조회 성공/ }), null)
   const blocked = v.find({ text: /저장하지 않은 변경이 있음 — 설정 저장 후 접속 확인/ })
   assert.ok(blocked, JSON.stringify(v.summary()))
   assert.equal(blocked!.disabled, true)
-  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  await v.toggle({ label: '패시브 모드' })
   assert.ok(v.find({ text: /목록 조회 성공/ }), '고친 것을 되돌리면 그 설정의 결과다')
   // 비밀번호를 적어만 두면(저장 전) 워커는 옛 계정으로 접속하므로 막는다
   await v.type({ label: '비밀번호' }, 'new-pw')
@@ -857,5 +858,199 @@ test('새 대상: 접속 정보를 저장하는 사이 계정 칸을 고치면, 
   assert.equal(v.valueOf({ label: '비밀번호' }), 'pw2', '그사이 고친 입력은 지우지 않는다')
   assert.ok(v.find({ text: /그 뒤에 고친 접속 정보는 아직 저장되지 않음/ }), JSON.stringify(v.summary()))
   assert.equal(v.find({ text: /저장하지 않은 접속 정보가 있음 — 접속 정보 저장 후 접속 확인/ })!.disabled, true)
+  await v.unmount()
+})
+
+// ── 대상 설정: 저장소에서 채우기 ──
+
+const suggested = (t: Record<string, unknown>) => ({
+  ...t,
+  mappings: [
+    { local: 'src/main/webapp', remote: '/' },
+    { local: 'build/classes/java/main', remote: '/WEB-INF/classes' }
+  ],
+  java: { source: 'src/main/java', output: 'build/classes/java/main', major: 55, build: '.\\gradlew.bat classes' },
+  manual: [{ pattern: 'src/main/webapp/WEB-INF/web.xml', reason: '운영 서버가 별도 파일을 씀' }]
+})
+
+test('저장소에서 채우기: 새 대상은 메인 체크아웃만 넣고 누르면 매핑·Java·손 처리 규칙이 초안에 들어간다(저장은 사람이)', slow, async () => {
+  const asked: { repo: string; tidy: boolean }[] = []
+  const saves: { target: { mappings: unknown[]; java?: { major: number } } }[] = []
+  const v = await editor({
+    'target.suggest': (input: { target: Record<string, unknown>; tidy: boolean }) => {
+      asked.push({ repo: String(input.target.repo), tidy: input.tidy })
+      return { errors: [], draft: suggested(input.target), notes: ['경로 매핑 1개를 넣었습니다: build/classes/java/main → /WEB-INF/classes'] }
+    },
+    'target.save': (input: { target: { mappings: unknown[]; java?: { major: number } } }) => {
+      saves.push(input)
+      return { errors: [] }
+    }
+  })
+  await v.press({ text: '새 대상' })
+  assert.equal(v.find({ text: '저장소에서 채우기' })!.disabled, true, '메인 체크아웃을 넣기 전에는 누를 수 없다')
+  await v.type({ label: '이름 (영문 소문자·숫자·_)' }, 'newone')
+  await v.type({ label: '메인 체크아웃' }, 'C:/work/repos/new-one')
+  await v.press({ text: '저장소에서 채우기' })
+  assert.deepEqual(asked, [{ repo: 'C:/work/repos/new-one', tidy: true }], '막 연 새 대상은 기본값까지 저장소에 맞춘다')
+  assert.ok(v.summary().some((x) => x.includes('저장소에서 채웠습니다 — 아직 저장 전')), JSON.stringify(v.summary()))
+  assert.ok(v.find({ text: /경로 매핑 1개를 넣었습니다/ }))
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  assert.deepEqual(v.rowsOf({ label: '손 처리 규칙' }), ['0'])
+  assert.equal(v.valueOf({ label: 'Java 빌드 출력 사용' }), true)
+  assert.equal(v.valueOf({ label: '운영 서버의 Java 버전 (class 파일 버전)' }), '55')
+  assert.equal(saves.length, 0, '채우기만으로는 저장하지 않는다')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0].target.mappings.length, 2)
+  assert.equal(saves[0].target.java!.major, 55)
+  assert.equal(v.summary().some((x) => x.includes('저장소에서 채웠습니다')), false, '저장한 뒤에는 "아직 저장 전" 안내를 내린다')
+  await v.unmount()
+})
+
+test('저장소에서 채우기: 쓰고 있는 대상·가져온 설정은 기본값 정리를 하지 않고, 채울 수 없으면 이유를 보여 준다', slow, async () => {
+  const tidies: boolean[] = []
+  let fail = false
+  const draft = { ...targetA, id: 'newapp', label: 'New App' }
+  const v = await editor({
+    'target.suggest': (input: { target: Record<string, unknown>; tidy: boolean }) => {
+      tidies.push(input.tidy)
+      return fail ? { errors: ['git 저장소가 아님: C:/x'], draft: null, notes: [] } : { errors: [], draft: suggested(input.target), notes: ['더 넣을 것이 없습니다'] }
+    },
+    'target.import': { errors: [], draft, notes: ['가져옴'] }
+  })
+  // 쓰고 있는 대상
+  await v.press({ text: '저장소에서 채우기' })
+  assert.ok(v.find({ text: /저장하지 않은 변경이 있음 — 설정 저장 후 확인/ }), '초안에 넣었으니 저장 전이다')
+  // 가져온 설정
+  await v.press({ text: '받은 설정 가져오기' })
+  await v.type({ label: '받은 글자' }, '{}')
+  await v.press({ text: '불러오기' })
+  await v.press({ text: '저장소에서 채우기' })
+  assert.deepEqual(tidies, [false, false])
+  // 채울 수 없으면 초안은 그대로 두고 이유를 보여 준다
+  fail = true
+  await v.press({ text: '저장소에서 채우기' })
+  assert.ok(v.find({ text: /git 저장소가 아님/ }), JSON.stringify(v.summary()))
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  await v.unmount()
+})
+
+test('표 아래 칸에 적기만 하고 추가하지 않은 줄이 있으면 저장하지 않고 알려 준다', slow, async () => {
+  let saves = 0
+  const v = await editor({
+    'target.save': () => {
+      saves++
+      return { errors: [] }
+    }
+  })
+  await v.type({ label: '로컬 경로' }, 'src/main/extra')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 0)
+  assert.ok(v.find({ text: /경로 매핑 칸에 적어 둔 줄이 표에 들어가지 않았습니다/ }), JSON.stringify(v.summary()))
+  // 마저 적고 추가하면 저장된다
+  await v.type({ label: '운영 경로' }, '/extra')
+  await v.press({ text: '추가' })
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 1)
+  assert.equal(v.find({ text: /표에 들어가지 않았습니다/ }), null)
+  // 줄을 골라 칸에 띄워 둔 것은 적어 둔 줄로 치지 않는다
+  await v.selectRows({ label: '경로 매핑' }, ['0'])
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 2)
+  // 손 처리 규칙도 같다
+  await v.type({ label: '패턴' }, 'docs/**')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 2)
+  assert.ok(v.find({ text: /손 처리 규칙 칸에 적어 둔 줄이 표에 들어가지 않았습니다/ }))
+  await v.unmount()
+})
+
+test('Java 빌드 출력을 켜면 빌드 결과 폴더를 운영에 잇는 경로 매핑도 같이 넣는다', slow, async () => {
+  const v = await editor({})
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0'])
+  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  assert.ok(JSON.stringify(v.tree()).includes('/WEB-INF/classes'))
+  assert.equal(v.valueOf({ label: '운영 서버의 Java 버전 (class 파일 버전)' }), '52')
+  // 껐다 켜도 같은 매핑을 두 번 넣지 않는다
+  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  await v.unmount()
+})
+
+test('저장소에서 채우기: 넣은 것이 없으면 "채웠다·저장 전"이라 하지 않고, 설정도 저장 안 된 상태로 만들지 않는다', slow, async () => {
+  const v = await editor({
+    'target.suggest': (input: { target: Record<string, unknown> }) => ({
+      errors: [],
+      draft: input.target,
+      notes: ['지금 설정이 저장소 구조와 맞습니다. 바꾼 것이 없습니다.']
+    })
+  })
+  await v.press({ text: '저장소에서 채우기' })
+  const seen = v.summary()
+  assert.ok(seen.some((x) => x.includes('저장소에서 더 넣을 것이 없습니다')), JSON.stringify(seen))
+  assert.equal(seen.some((x) => x.includes('아직 저장 전')), false, JSON.stringify(seen))
+  assert.ok(v.find({ text: /지금 설정이 저장소 구조와 맞습니다/ }))
+  assert.equal(v.find({ text: /이 프로젝트에만 있는 규칙을 더한 뒤 저장하세요/ }), null)
+  // 바뀐 것이 없으니 저장 안 된 변경도 없다
+  assert.equal(v.find({ text: '설정 확인 (abc1234)' })!.disabled, false, JSON.stringify(seen))
+  await v.unmount()
+})
+
+test('저장소에서 채우기: 표의 줄을 골라 둔 채 채워도, 고른 줄이 칸에 남아 다음 저장을 막지 않는다', slow, async () => {
+  let saves = 0
+  const v = await editor({
+    'target.suggest': (input: { target: Record<string, unknown> }) => ({ errors: [], draft: suggested(input.target), notes: ['넣음'] }),
+    'target.save': () => {
+      saves++
+      return { errors: [] }
+    }
+  })
+  await v.selectRows({ label: '경로 매핑' }, ['0'])
+  assert.equal(v.valueOf({ label: '로컬 경로' }), 'src/main/webapp')
+  await v.press({ text: '저장소에서 채우기' })
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  assert.equal(v.valueOf({ label: '로컬 경로' }), '', '고른 줄을 띄워 둔 칸도 같이 비운다')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 1, JSON.stringify(v.summary()))
+  // 칸에 적어 둔 줄이 있으면 채우기 전에 먼저 정리하게 한다(줄 번호가 바뀌어 잃지 않게)
+  await v.type({ label: '로컬 경로' }, 'src/main/extra')
+  await v.press({ text: '저장소에서 채우기' })
+  assert.ok(v.find({ text: /경로 매핑 칸에 적어 둔 줄이 표에 들어가지 않았습니다.*저장소에서 채우기를 누르세요/ }), JSON.stringify(v.summary()))
+  assert.equal(v.valueOf({ label: '로컬 경로' }), 'src/main/extra')
+  await v.unmount()
+})
+
+test('표에서 고른 줄을 풀면 칸에 띄워 둔 그 줄도 비운다 — 고친 내용이 있으면 남긴다', slow, async () => {
+  let saves = 0
+  const v = await editor({
+    'target.save': () => {
+      saves++
+      return { errors: [] }
+    }
+  })
+  await v.selectRows({ label: '경로 매핑' }, ['0'])
+  await v.selectRows({ label: '경로 매핑' }, [])
+  assert.equal(v.valueOf({ label: '로컬 경로' }), '')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 1, '풀어 둔 줄이 적어 둔 줄로 잡혀 저장을 막으면 안 된다')
+  // 고른 뒤 칸을 고쳤으면 풀어도 남기고, 저장 전에 알린다
+  await v.selectRows({ label: '경로 매핑' }, ['0'])
+  await v.type({ label: '운영 경로' }, 'changed')
+  await v.selectRows({ label: '경로 매핑' }, [])
+  assert.equal(v.valueOf({ label: '운영 경로' }), '/changed')
+  await v.press({ text: '설정 저장' })
+  assert.equal(saves, 1)
+  assert.ok(v.find({ text: /경로 매핑 칸에 적어 둔 줄이 표에 들어가지 않았습니다/ }))
+  await v.unmount()
+})
+
+test('Java 빌드 출력을 켤 때, 위 폴더의 매핑이 이미 결과 폴더를 잇고 있으면 매핑을 더 넣지 않는다', slow, async () => {
+  const custom = { ...targetA, mappings: [{ local: 'src/main/webapp', remote: '/' }, { local: 'build/classes', remote: '/custom' }] }
+  const v = await editor({ 'target.get': () => ({ target: custom, credUser: 'ftpuser', netrc: false }) })
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'])
+  await v.toggle({ label: 'Java 빌드 출력 사용' })
+  assert.deepEqual(v.rowsOf({ label: '경로 매핑' }), ['0', '1'], '더 구체적인 매핑을 넣으면 지금 이어져 있는 반영 위치가 바뀐다')
   await v.unmount()
 })

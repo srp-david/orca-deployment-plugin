@@ -91,6 +91,8 @@ type Editing = {
   netrc: boolean
   /** 이 편집기에서 새로 만들거나 가져온 대상: 쓸 수 있게 될 때까지 "다음에 할 일"을 보여 준다. */
   fresh: boolean
+  /** 받은 설정을 가져와 연 초안. 팀이 정한 값이라 "저장소에서 채우기"가 기본값 정리를 하지 않는다. */
+  imported: boolean
 }
 const editing = atom<Editing | null>(null)
 let editSession = 0
@@ -106,6 +108,8 @@ const editBusy = atom(false)
 const importing = atom<{ text: string; errors: string[] } | null>(null)
 /** 가져온 초안을 열었을 때, 받은 사람이 확인할 것. */
 const importNotes = atom<string[]>([])
+/** "저장소에서 채우기"가 무엇을 넣었는지. 저장하거나 다른 대상을 열면 지운다. */
+const suggestNotes = atom<{ changed: boolean; notes: string[] } | null>(null)
 /** 내보낸 글자. 설정이 바뀌면 지운다(옛 설정의 글자를 보내지 않게). */
 const exported = atom<string | null>(null)
 const editErrors = atom<string[]>([])
@@ -382,6 +386,9 @@ function newEditSession(): number {
   set(advancedOpen, false)
   closeImport()
   set(importNotes, [])
+  set(suggestNotes, null)
+  set(mapForm, { local: '', remote: '' })
+  set(ruleForm, { pattern: '', reason: '' })
   set(exported, null)
   set(editLoading, null)
   return ++editSession
@@ -402,7 +409,7 @@ function closeImport(): void {
 async function editTarget(id: string | null): Promise<void> {
   act()
   const session = newEditSession()
-  if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false, fresh: true })
+  if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false, fresh: true, imported: false })
   // 앞 편집기는 여기서 닫는다: 불러오는 동안 앞 대상의 응답·동작이 끼어들 자리를 없앤다.
   set(editing, null)
   set(editLoading, id)
@@ -411,7 +418,7 @@ async function editTarget(id: string | null): Promise<void> {
   if (editSession !== session) return
   set(editLoading, null)
   if (d) {
-    set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc, fresh: false })
+    set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc, fresh: false, imported: false })
     set(cred, { user: d.credUser ?? '', password: '' })
   }
 }
@@ -437,7 +444,7 @@ async function importTarget(): Promise<void> {
   if (!r || importGen !== gen || !now || now.text !== im.text) return
   if (!r.draft) return set(importing, { text: now.text, errors: r.errors })
   const session = newEditSession()
-  set(editing, { session, draft: r.draft, saved: '', previousId: null, credUser: null, netrc: false, fresh: true })
+  set(editing, { session, draft: r.draft, saved: '', previousId: null, credUser: null, netrc: false, fresh: true, imported: true })
   set(importNotes, r.notes)
 }
 
@@ -456,6 +463,9 @@ async function saveEdit(): Promise<void> {
   act()
   const e = read(editing)
   if (!e || read(editBusy)) return
+  // 표 아래 칸에 적기만 하고 '추가'를 누르지 않은 줄은 설정에 들어 있지 않다: 모르고 저장하지 않게 먼저 알린다.
+  const left = pendingRows(e.draft)
+  if (left.length) return set(editErrors, left)
   const sent = e.draft
   // 새 대상은 접속 정보 칸에 적어 둔 계정을 설정에 이어서 저장한다. 자격 증명은 대상 이름에 묶이므로 설정이 저장된 뒤에만 쓴다.
   const typed = read(cred)
@@ -488,6 +498,7 @@ async function saveEdit(): Promise<void> {
       set(editing, next)
       set(editNotice, isDirty(next) ? null : '저장함')
       set(importNotes, [])
+      set(suggestNotes, null)
       set(exported, null)
     }
     // 저장은 이미 됐다: 편집기가 어디에 있든 그 대상의 준비 확인·plan 은 버린다.
@@ -521,6 +532,84 @@ async function saveEdit(): Promise<void> {
   }
   // 목록을 다시 읽는다(저장에 성공했을 때만 여기까지 온다).
   await loadTargets()
+}
+
+/** 표 아래 칸에 적어 두고 표에 넣지 않은 줄이 있으면 그 안내. 고른 줄을 칸에 그대로 띄워 둔 것은 치지 않는다. */
+function pendingRows(t: Target): string[] {
+  const out: string[] = []
+  const m = read(mapForm)
+  const mSel = read(mapSel) === null ? null : t.mappings[Number(read(mapSel))]
+  if ((m.local.trim() || m.remote.trim()) && !(mSel && mSel.local === m.local.trim() && mSel.remote === m.remote.trim()))
+    out.push("경로 매핑 칸에 적어 둔 줄이 표에 들어가지 않았습니다 — '추가'(또는 '고치기')를 누르거나 칸을 비운 뒤 저장하세요")
+  const r = read(ruleForm)
+  const rSel = read(ruleSel) === null ? null : t.manual[Number(read(ruleSel))]
+  if ((r.pattern.trim() || r.reason.trim()) && !(rSel && rSel.pattern === r.pattern.trim() && rSel.reason === r.reason.trim()))
+    out.push("손 처리 규칙 칸에 적어 둔 줄이 표에 들어가지 않았습니다 — '추가'(또는 '고치기')를 누르거나 칸을 비운 뒤 저장하세요")
+  return out
+}
+
+/** Java 빌드 출력을 켠다. 빌드 결과 폴더를 운영에 잇는 경로 매핑이 없으면 같이 넣는다(없으면 저장이 거절된다). */
+function withJava(t: Target): Target {
+  const java = t.java ?? { source: 'src/main/java', output: 'build/classes/java/main', major: 52 }
+  const clean = (p: string) => p.split('\\').join('/').replace(/^[/]+|[/]+$/g, '')
+  const output = clean(java.output)
+  // 그 폴더나 위 폴더의 매핑이 이미 있으면 넣지 않는다: 더 구체적인 매핑을 넣으면 지금 이어져 있는 반영 위치가 바뀐다.
+  const mapped = t.mappings.some((m) => {
+    const local = clean(m.local)
+    return local === '' || local === output || output.startsWith(local + '/')
+  })
+  return { ...t, java, mappings: mapped ? t.mappings : [...t.mappings, { local: java.output, remote: '/WEB-INF/classes' }] }
+}
+
+/** 경로 매핑 표에서 줄을 고르거나 고른 것을 푼다. 풀 때, 칸에 그 줄을 그대로 띄워 둔 것이면 칸도 비운다(고친 내용이 있으면 남긴다). */
+function pickMapping(t: Target, k: string | null): void {
+  const prev = read(mapSel) === null ? null : t.mappings[Number(read(mapSel))]
+  const f = read(mapForm)
+  if (k) set(mapForm, { ...t.mappings[Number(k)] })
+  else if (prev && prev.local === f.local.trim() && prev.remote === f.remote.trim()) set(mapForm, { local: '', remote: '' })
+  set(mapSel, k)
+}
+function pickRule(t: Target, k: string | null): void {
+  const prev = read(ruleSel) === null ? null : t.manual[Number(read(ruleSel))]
+  const f = read(ruleForm)
+  if (k) set(ruleForm, { ...t.manual[Number(k)] })
+  else if (prev && prev.pattern === f.pattern.trim() && prev.reason === f.reason.trim()) set(ruleForm, { pattern: '', reason: '' })
+  set(ruleSel, k)
+}
+
+/**
+ * 저장소에서 채우기: 메인 체크아웃의 폴더 구조로 경로 매핑·Java 빌드 출력·손 처리 규칙을 제안받아 초안에 넣는다.
+ * 이 PC 의 폴더만 읽는다. 있는 값은 바꾸지 않고 빠진 것만 넣으며, 저장은 사람이 보고 누른다.
+ */
+async function suggestRepo(): Promise<void> {
+  act()
+  const e = read(editing)
+  if (!e || !e.draft.repo.trim() || read(editBusy)) return
+  // 표의 줄 번호가 바뀔 수 있다. 칸에 적어 둔 줄이 있으면 잃거나 엉뚱한 줄에 붙지 않게 먼저 정리하게 한다.
+  const left = pendingRows(e.draft)
+  if (left.length) return set(editErrors, left.map((x) => x.replace('저장하세요', '저장소에서 채우기를 누르세요')))
+  const sent = snapshot(e.draft)
+  set(editBusy, true)
+  // 막 "새 대상"으로 연 초안만 기본값(없는 폴더의 매핑, main 브랜치)까지 저장소에 맞춘다.
+  const tidy = !e.previousId && !e.imported
+  const r = await ask(() => plugin.request('target.suggest', plain({ target: e.draft, tidy }))).finally(() => set(editBusy, false))
+  const now = read(editing)
+  if (!r || !now || !sameSession(e.session)) return
+  if (!r.draft) return set(editErrors, r.errors)
+  // 기다리는 사이 칸을 고쳤으면 그 변경을 덮지 않는다.
+  if (snapshot(now.draft) !== sent) return set(editErrors, ['기다리는 사이 칸이 바뀌어서 넣지 않았습니다 — 저장소에서 채우기를 다시 누르세요'])
+  const draft = r.draft
+  set(editErrors, [])
+  // 넣은 것이 없으면 초안을 건드리지 않고, "채웠다·저장 전"이라고 말하지도 않는다.
+  const changed = snapshot(draft) !== sent
+  set(suggestNotes, { changed, notes: r.notes })
+  if (!changed) return
+  patch(() => draft)
+  // 줄이 늘거나 빠져 번호가 달라졌을 수 있다: 고른 줄과, 그 줄을 띄워 둔 칸을 함께 비운다(적어 둔 줄이 없음은 위에서 확인했다).
+  set(mapSel, null)
+  set(ruleSel, null)
+  set(mapForm, { local: '', remote: '' })
+  set(ruleForm, { pattern: '', reason: '' })
 }
 
 async function deleteEdit(): Promise<void> {
@@ -1272,9 +1361,13 @@ function SetupGuide(props: { e: Editing; typedCred: boolean; connOk: boolean; ch
           : '칸을 확인하고, 접속 정보(FTP 계정)도 적은 뒤 맨 아래에서 저장'
     },
     {
-      done: !!e.credUser || e.netrc,
+      done: (!!e.credUser || e.netrc) && (isNew || !credDirty(e)),
       label: '접속 정보(FTP 계정) 저장',
-      hint: isNew ? '접속 정보 칸에 적어 두면 설정과 함께 저장됩니다' : '접속 정보 칸에 적고 접속 정보 저장'
+      hint: isNew
+        ? '접속 정보 칸에 적어 두면 설정과 함께 저장됩니다'
+        : e.credUser || e.netrc
+          ? '칸에 적은 접속 정보가 아직 저장되지 않았습니다 — 접속 정보 저장'
+          : '접속 정보 칸에 적고 접속 정보 저장'
     },
     { done: props.connOk, label: '접속 확인', hint: '접속 정보 칸의 접속 확인 버튼 — 주소와 계정이 맞는지 봅니다(운영 읽기)' },
     {
@@ -1306,6 +1399,19 @@ function SetupGuide(props: { e: Editing; typedCred: boolean; connOk: boolean; ch
   )
 }
 
+const JAVA_MAJORS = [
+  { value: '52', label: 'Java 8 (major 52)' },
+  { value: '55', label: 'Java 11 (major 55)' },
+  { value: '61', label: 'Java 17 (major 61)' },
+  { value: '65', label: 'Java 21 (major 65)' }
+]
+/** 고를 수 있는 Java 버전. 설정에 다른 값이 들어 있으면 그 값도 보여 준다(모르는 사이 바뀌지 않게). */
+function javaOptions(major: number): { value: string; label: string }[] {
+  const now = String(major)
+  if (JAVA_MAJORS.some((o) => o.value === now)) return JAVA_MAJORS
+  return [...JAVA_MAJORS, { value: now, label: major >= 49 ? `Java ${major - 44} (major ${major})` : `major ${major}` }]
+}
+
 function TargetEditor() {
   const e = read(editing)!
   const t = e.draft
@@ -1319,6 +1425,7 @@ function TargetEditor() {
   const dirty = isDirty(e)
   const busyEdit = read(editBusy)
   const notes = read(importNotes)
+  const filled = read(suggestNotes)
   const shareText = read(exported)
   const ccRunning = !!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting')
   // 확인 결과는 화면의 설정이 확인한 그 설정일 때만 맞는 말이다.
@@ -1363,6 +1470,26 @@ function TargetEditor() {
           </Stack>
         </Callout>
       )}
+      {filled && (
+        <Callout
+          tone={filled.changed ? 'accent' : 'neutral'}
+          title={filled.changed ? '저장소에서 채웠습니다 — 아직 저장 전' : '저장소에서 더 넣을 것이 없습니다'}
+          icon={filled.changed ? 'info' : 'check'}
+        >
+          <Stack gap="xs">
+            {filled.notes.map((x, i) => (
+              <Text key={`sn${i}`} size="xs">
+                {`· ${x}`}
+              </Text>
+            ))}
+            {filled.changed && (
+              <Text size="xs" muted>
+                제안입니다. 아래 경로 매핑·Java 빌드 출력·손 처리 규칙을 보고, 이 프로젝트에만 있는 규칙을 더한 뒤 저장하세요.
+              </Text>
+            )}
+          </Stack>
+        </Callout>
+      )}
       {(e.fresh || !hasCred) && <SetupGuide e={e} typedCred={typedCred} connOk={connOk} checkOk={ccCurrent && cc?.ok === true} />}
 
       <Card title="대상" description="저장소와 확인용 커밋">
@@ -1383,6 +1510,16 @@ function TargetEditor() {
             onChange={(v) => patch((x) => ({ ...x, label: v }))}
           />
           <TextField label="메인 체크아웃" value={t.repo} placeholder="C:/work/repos/my-app" onChange={(v) => patch((x) => ({ ...x, repo: v.trim() }))} />
+          <Stack gap="xs">
+            <Row gap="xs">
+              <Button icon="search" size="sm" variant="outline" disabled={!t.repo.trim() || busyEdit} onPress={suggestRepo}>
+                저장소에서 채우기
+              </Button>
+            </Row>
+            <Text size="xs" muted>
+              메인 체크아웃의 폴더 구조를 보고 경로 매핑·Java 빌드 출력·손 처리 규칙을 제안합니다. 이 PC 의 폴더만 읽고, 있는 값은 바꾸지 않습니다.
+            </Text>
+          </Stack>
           <TextField
             label="확인용 커밋 (이미 반영된 커밋)"
             value={t.checkCommit ?? ''}
@@ -1478,11 +1615,7 @@ function TargetEditor() {
             label="경로 매핑"
             selectionMode="single"
             selected={read(mapSel) ? [read(mapSel)!] : []}
-            onSelectionChange={({ keys }) => {
-              const k = keys[0] ?? null
-              set(mapSel, k)
-              if (k) set(mapForm, { ...t.mappings[Number(k)] })
-            }}
+            onSelectionChange={({ keys }) => pickMapping(t, keys[0] ?? null)}
             columns={[
               { key: 'local', label: '로컬 경로' },
               { key: 'remote', label: '운영 경로' }
@@ -1527,6 +1660,7 @@ function TargetEditor() {
                 const i = Number(read(mapSel))
                 patch((x) => ({ ...x, mappings: x.mappings.filter((_, j) => j !== i) }))
                 set(mapSel, null)
+                set(mapForm, { local: '', remote: '' })
               }}
             >
               삭제
@@ -1540,20 +1674,16 @@ function TargetEditor() {
           <Switch
             label="Java 빌드 출력 사용"
             checked={!!t.java}
-            onChange={(v) =>
-              patch((x) => ({
-                ...x,
-                java: v ? (x.java ?? { source: 'src/main/java', output: 'build/classes/java/main', major: 52 }) : undefined
-              }))
-            }
+            onChange={(v) => patch((x) => (v ? withJava(x) : { ...x, java: undefined }))}
           />
           {t.java && (
             <Stack gap="md">
               <TextField label="소스 폴더" value={t.java.source} onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, source: v.trim() } }))} />
               <TextField label="빌드 결과 폴더" value={t.java.output} onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, output: v.trim() } }))} />
-              <TextField
-                label="class major 버전 (Java 8 = 52, 11 = 55, 17 = 61)"
+              <Select
+                label="운영 서버의 Java 버전 (class 파일 버전)"
                 value={String(t.java.major)}
+                options={javaOptions(t.java.major)}
                 onChange={(v) => patch((x) => ({ ...x, java: { ...x.java!, major: Number(v) || 0 } }))}
               />
               <Textarea
@@ -1574,11 +1704,7 @@ function TargetEditor() {
             selectionMode="single"
             maxHeight="sm"
             selected={read(ruleSel) ? [read(ruleSel)!] : []}
-            onSelectionChange={({ keys }) => {
-              const k = keys[0] ?? null
-              set(ruleSel, k)
-              if (k) set(ruleForm, { ...t.manual[Number(k)] })
-            }}
+            onSelectionChange={({ keys }) => pickRule(t, keys[0] ?? null)}
             columns={[
               { key: 'pattern', label: '패턴' },
               { key: 'reason', label: '이유' }
@@ -1623,6 +1749,7 @@ function TargetEditor() {
                 const i = Number(read(ruleSel))
                 patch((x) => ({ ...x, manual: x.manual.filter((_, j) => j !== i) }))
                 set(ruleSel, null)
+                set(ruleForm, { pattern: '', reason: '' })
               }}
             >
               삭제

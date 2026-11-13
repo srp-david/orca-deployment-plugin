@@ -5,7 +5,7 @@
 ![운영 반영 구조: 패널이 워커에 요청하고, 워커와 Claude 스킬이 띄운 CLI 프로세스가 엔진으로 메인 체크아웃·운영 FTP·자격 증명 관리자를 다루며, 진행은 run·작업 기록으로 워커가 읽는다](diagrams/architecture.png)
 
 ```
-src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 작업 기록, class 파일 상수 읽기(classfile.ts), 대상 설정 공유 형식(share.ts)
+src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 작업 기록, class 파일 상수 읽기(classfile.ts), 대상 설정 공유 형식(share.ts), 저장소 구조로 설정 제안(suggest.ts)
 src/cli.ts           CLI. 스킬과 워커가 같은 엔진을 이 명령으로 부름
 src/worker.ts        플러그인 워커. 짧은 일은 엔진을 직접, 운영 FTP 단계는 CLI 프로세스를 따로 띄움(ADR 0002)
 src/panel.tsx        패널(Orca components)

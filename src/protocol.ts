@@ -89,6 +89,12 @@ declare module 'orca' {
     'target.export': { input: { id: string }; output: { text: string } }
     /** 받은 글자를 검사해 새 대상의 초안을 만든다(저장하지 않는다). notes 는 받은 사람이 확인할 것. */
     'target.import': { input: { text: string }; output: { errors: string[]; draft: Target | null; notes: string[] } }
+    /**
+     * 저장소에서 채우기: 화면의 설정 초안(target)의 메인 체크아웃을 읽어 경로 매핑·Java 빌드 출력·손 처리 규칙을 제안한다.
+     * 이 PC 의 폴더만 읽고, 저장하지 않는다. 있는 값은 바꾸지 않고 빠진 것만 넣은 초안과, 무엇을 넣었는지를 돌려준다.
+     * tidy: 막 "새 대상"으로 연 빈 초안 — 기본으로 들어 있던 값도 저장소에 맞춘다.
+     */
+    'target.suggest': { input: { target: Target; tidy: boolean }; output: { errors: string[]; draft: Target | null; notes: string[] } }
     'creds.set': { input: { id: string; user: string; password: string }; output: { user: string } }
     'creds.delete': { input: { id: string }; output: null }
     'workspace.detect': { output: Workspace }

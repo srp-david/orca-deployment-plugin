@@ -13,6 +13,7 @@ import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep 
 import { preflight } from './engine/plan.ts'
 import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
 import { exportChecked, parseShared, repoIdentity, sameRepoIdentity, sharedToTarget } from './engine/share.ts'
+import { isDir, mergeSuggestion, suggestFromRepo } from './engine/suggest.ts'
 import {
   defaultRuns,
   deleteTarget,
@@ -28,7 +29,7 @@ import {
   validateTarget,
   type Target
 } from './engine/target.ts'
-import { exec, Stop, toNative } from './engine/util.ts'
+import { exec, expandHome, Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
 import { cliSpawnError } from './cli-spawn.ts'
 import { configVerdict } from './config-verdict.ts'
@@ -436,11 +437,49 @@ export default function activate(orca: OrcaWorkerApi): void {
       )
       if (!shared.checkCommit)
         notes.push('받은 설정에 확인용 커밋이 없습니다. 설정 확인을 하려면 이미 운영에 반영된 커밋을 넣고 저장하세요.')
+      // 빌드 명령은 개인 경로가 섞일 수 있어 내보내지 않는다.
+      if (shared.java)
+        notes.push("받은 설정에 빌드 명령은 들어 있지 않습니다. Java 를 반영하려면 '저장소에서 채우기'로 제안을 받거나, 보낸 사람에게 물어 넣으세요.")
       if (listTargets().some((t) => t.id === shared.id))
         notes.push(
           `같은 이름의 대상(${shared.id})이 이미 있습니다. 덮어쓰지 않습니다 — 그 대상을 고쳐 쓰거나, 이름을 바꿔 저장하세요(이름을 바꾸면 run 기록 폴더 끝의 이름도 같이 고치세요).`
         )
       return { errors: [], draft: sharedToTarget(shared, repo, runs), notes }
+    })
+  )
+
+  orca.panels.handle('target.suggest', ({ target, tidy }) =>
+    guard(async () => {
+      const none = (why: string) => ({ errors: [why], draft: null, notes: [] })
+      // 아직 저장하지 않은 초안이라 빈 칸이 있을 수 있다. 폴더를 읽기 전에 여기서 쓰는 칸의 모양만 본다.
+      const str = (v: unknown): v is string => typeof v === 'string'
+      const shaped =
+        !!target &&
+        typeof target === 'object' &&
+        Array.isArray(target.mappings) &&
+        target.mappings.every((m) => !!m && str(m.local) && str(m.remote)) &&
+        Array.isArray(target.manual) &&
+        target.manual.every((r) => !!r && str(r.pattern) && str(r.reason)) &&
+        (target.java === undefined || (!!target.java && str(target.java.source) && str(target.java.output)))
+      if (!shaped) return none('설정의 형식이 틀려서 채우지 못함 — 편집기를 닫고 다시 여세요')
+      const typed = str(target.repo) ? expandHome(target.repo.trim()) : ''
+      if (!typed) return none('메인 체크아웃 경로를 먼저 넣으세요')
+      const missing = repoProblem(typed)
+      if (missing) return none(missing)
+      // 매핑의 로컬 경로는 저장소 맨 위 기준이다. 저장소 안의 하위 폴더를 넣었으면 맨 위로 바꾼다.
+      const top = await quickGit(typed, ['rev-parse', '--show-toplevel'])
+      if (!top) return none(`git 저장소가 아님: ${typed} — main 을 받아 두고 빌드하는 저장소 폴더를 넣으세요`)
+      const slashed = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+      const root = slashed(top)
+      const same = root.toLowerCase() === slashed(typed).toLowerCase()
+      const { target: draft, notes } = mergeSuggestion({ ...target, repo: same ? target.repo : root }, await suggestFromRepo(root), {
+        tidy: !!tidy,
+        // 저장소 밖을 가리키는 경로(.., 절대 경로)는 들여다보지 않는다. 그런 매핑은 저장할 때 따로 거절된다.
+        exists: (rel) => /(^|\/)\.\.(\/|$)/.test(rel) || /^[a-zA-Z]:|^\//.test(rel) || isDir(`${root}/${rel}`)
+      })
+      if (!same) notes.unshift(`메인 체크아웃을 저장소 맨 위 폴더 ${root} 로 바꿨습니다.`)
+      if (notes.length === 0) notes.push('지금 설정이 저장소 구조와 맞습니다. 바꾼 것이 없습니다.')
+      return { errors: [], draft, notes }
     })
   )
 

@@ -348,3 +348,48 @@ test('접속 확인: 접속 정보가 없으면 접속하지 않고 그렇게 �
   assert.match(refused, /업로드 작업이 도는 중/)
   await worker.deactivate()
 })
+
+test('저장소에서 채우기: 이 PC 의 폴더만 읽어 초안을 돌려주고 저장하지 않는다. 하위 폴더를 넣었으면 저장소 맨 위로 바꾼다', async () => {
+  const root = `${home}/suggest-repo`
+  for (const f of ['src/main/webapp/WEB-INF/web.xml', 'src/main/java/com/x/Foo.java', 'build.gradle'])
+    mkdirSync(join(root, f, '..'), { recursive: true })
+  spawnSync('git', ['init', '-q', '-b', 'main', root])
+  writeFileSync(`${root}/src/main/webapp/WEB-INF/web.xml`, '<web-app/>')
+  writeFileSync(`${root}/src/main/java/com/x/Foo.java`, 'class Foo {}')
+  writeFileSync(`${root}/build.gradle`, "sourceCompatibility = '1.8'\n")
+  const worker = await mountWorker(main, { host: host([]) })
+  const before = (await worker.request('targets.list')).length
+  const blank = { ...target, id: 'sg', repo: `${root}/src/main`, mappings: [{ local: 'no/such/folder', remote: '/x' }], manual: [] }
+  const r = await worker.request('target.suggest', { target: blank, tidy: true })
+  assert.deepEqual(r.errors, [])
+  assert.equal(r.draft!.repo.toLowerCase(), root.toLowerCase(), '매핑은 저장소 맨 위 기준이라 맨 위 폴더로 바꾼다')
+  assert.ok(r.notes[0].includes('메인 체크아웃을 저장소 맨 위 폴더'), JSON.stringify(r.notes))
+  // 사람이 넣은 매핑은 폴더가 없어도 빼지 않는다(새 대상의 기본값 그대로인 것만 정리한다)
+  assert.deepEqual(r.draft!.mappings, [
+    { local: 'no/such/folder', remote: '/x' },
+    { local: 'src/main/webapp', remote: '/' },
+    { local: 'build/classes/java/main', remote: '/WEB-INF/classes' }
+  ])
+  assert.ok(r.notes.some((n: string) => n.includes('그대로 둠') && n.includes('no/such/folder')), JSON.stringify(r.notes))
+  assert.equal(r.draft!.java!.major, 52)
+  assert.deepEqual(r.draft!.manual.map((x: { pattern: string }) => x.pattern), ['src/main/webapp/WEB-INF/web.xml'])
+  assert.equal((await worker.request('targets.list')).length, before, '제안은 저장하지 않는다')
+  // 저장소 밖을 가리키는 경로는 들여다보지 않고, 모양이 틀린 초안은 폴더를 읽기 전에 거절한다
+  const outside = await worker.request('target.suggest', { target: { ...blank, repo: root, mappings: [{ local: '../elsewhere', remote: '/y' }] }, tidy: true })
+  assert.deepEqual(outside.draft!.mappings[0], { local: '../elsewhere', remote: '/y' })
+  assert.equal(outside.notes.some((n: string) => n.includes('../elsewhere')), false, JSON.stringify(outside.notes))
+  const odd = await worker.request('target.suggest', { target: { ...blank, repo: root, mappings: [{ local: 1, remote: '/' }] } as never, tidy: true })
+  assert.equal(odd.draft, null)
+  assert.ok(odd.errors[0].includes('형식이 틀려서'))
+  // 채울 수 없는 경우는 이유를 돌려준다
+  const empty = await worker.request('target.suggest', { target: { ...blank, repo: ' ' }, tidy: true })
+  assert.equal(empty.draft, null)
+  assert.ok(empty.errors[0].includes('메인 체크아웃 경로를 먼저'))
+  const gone = await worker.request('target.suggest', { target: { ...blank, repo: `${home}/no-such-repo` }, tidy: true })
+  assert.ok(gone.errors[0].includes('메인 체크아웃이 없음'))
+  mkdirSync(`${home}/plain-folder`, { recursive: true })
+  const plainDir = await worker.request('target.suggest', { target: { ...blank, repo: `${home}/plain-folder` }, tidy: true })
+  // 임시 폴더가 다른 저장소 안에 있지 않다면 git 저장소가 아니라고 알려 준다
+  if (plainDir.draft === null) assert.ok(plainDir.errors[0].includes('git 저장소가 아님'), JSON.stringify(plainDir.errors))
+  await worker.deactivate()
+})
