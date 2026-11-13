@@ -567,6 +567,48 @@ async function scenarios(tip1: string): Promise<void> {
     assert.match(r.out, /✘ main pull 됨\n\s+origin\/main 보다 1커밋 뒤/)
   })
 
+  await step('접속 확인: 로그인해서 운영 루트의 목록만 받아 보고, 실패는 원인별로 가린다', async () => {
+    const { Ftp, resolveAuth } = await import('../src/engine/ftp.ts')
+    const { connVerdict } = await import('../src/conn-verdict.ts')
+    const { loadTarget } = await import('../src/engine/target.ts')
+    const t = loadTarget('fx')
+    const user = { kind: 'user' as const, user: 'test', password: 'test' }
+    const at = (over: Partial<typeof t.connection>) => ({ ...t, connection: { ...t.connection, ...over } })
+    // 저장된 접속 정보(여기서는 임시 netrc)로
+    const ok = await new Ftp(t, await resolveAuth(t)).probe(t.connection.root)
+    assert.equal(ok.ok, true, JSON.stringify(ok))
+    assert.ok(ok.ok && ok.count >= 3, JSON.stringify(ok))
+    assert.equal(connVerdict(t, ok, 20).result, 'ok')
+    // 비밀번호가 틀림
+    const badPw = await new Ftp(t, { ...user, password: 'wrong' }).probe(t.connection.root)
+    assert.deepEqual([badPw.ok, !badPw.ok && badPw.code], [false, 67], JSON.stringify(badPw))
+    // 운영 루트가 틀림(없는 폴더)
+    const badRoot = await new Ftp(at({ root: '/no-such-root' }), user).probe('/no-such-root')
+    assert.deepEqual([badRoot.ok, !badRoot.ok && badRoot.code], [false, 9], JSON.stringify(badRoot))
+    assert.match(connVerdict(at({ root: '/no-such-root' }), badRoot, 20).message, /운영 루트\(\/no-such-root\) 폴더에 들어가지 못함/)
+    // 포트가 틀림(듣는 서버 없음)
+    const badPort = await new Ftp(at({ port: PORT + 1 }), user).probe(t.connection.root, 5)
+    assert.equal(badPort.ok, false)
+    assert.match(connVerdict(at({ port: PORT + 1 }), badPort, 5).message, /서버에 연결하지 못함|응답이 없음/)
+    // 빈 폴더: 로그인은 됐지만 성공으로 치지 않는다
+    mkdirSync(join(ftpRoot, 'empty-root'), { recursive: true })
+    const empty = await new Ftp(at({ root: '/empty-root' }), user).probe('/empty-root')
+    assert.deepEqual(empty, { ok: true, count: 0 })
+    assert.equal(connVerdict(at({ root: '/empty-root' }), empty, 20).result, 'empty')
+    // 목록 권한만 없는 계정
+    writeFileSync(`${tmp}/deny-nlst.txt`, '/app\n')
+    try {
+      const denied = await new Ftp(t, user).probe(t.connection.root)
+      assert.equal(denied.ok, false, JSON.stringify(denied))
+      assert.match(connVerdict(t, denied, 20).message, /목록을 받지 못함/)
+    } finally {
+      rmSync(`${tmp}/deny-nlst.txt`)
+    }
+    // 접속 확인은 아무것도 쓰지 않는다
+    assert.equal(ftpText('ui/a.xml') !== null, true)
+    assert.equal(existsSync(join(ftpRoot, 'no-such-root')), false)
+  })
+
   await step('run 목록과 상태', () => {
     const r = cli('runs', '--target', 'fx')
     assert.equal(r.code, 0)

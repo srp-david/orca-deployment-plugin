@@ -29,6 +29,12 @@ function urlPath(p: string): string {
     .join('/')
 }
 
+/** 접속 확인에 쓰는 시간 제한(초). 패널 요청 하나가 이보다 오래 붙잡히지 않게 한다. */
+export const PROBE_SECONDS = 20
+
+/** 접속 확인 결과: 성공이면 그 폴더의 항목 수, 실패면 curl 종료 코드와 첫 줄. */
+export type Probe = { ok: true; count: number } | { ok: false; code: number; err: string }
+
 export class Ftp {
   readonly t: Target
   readonly auth: FtpAuth
@@ -50,8 +56,8 @@ export class Ftp {
     return this.base() + urlPath(remote)
   }
 
-  private async curl(args: string[]): Promise<{ ok: boolean; code: number; out: Buffer; err: string }> {
-    const common = ['-sS', '--max-time', '60']
+  private async curl(args: string[], seconds = 60): Promise<{ ok: boolean; code: number; out: Buffer; err: string }> {
+    const common = ['-sS', '--max-time', String(seconds)]
     const verbose = !!process.env.PRODDEPLOY_CURL_VERBOSE
     if (verbose) common.push('-v')
     if (this.t.connection.passive === false) common.push('--ftp-port', '-')
@@ -60,7 +66,7 @@ export class Ftp {
       common.push('-K', '-')
       input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
     } else common.push('--netrc-file', this.auth.file)
-    const r = await exec('curl', [...common, ...args], { input, timeoutMs: 120000 })
+    const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
     if (r.code !== 0 && r.err.trim())
       this.log(`curl: ${verbose ? r.err.replace(/^> PASS .*$/gm, '> PASS ***') : r.err.trim()}`)
     return { ok: r.code === 0, code: r.code, out: r.out, err: r.err }
@@ -107,6 +113,28 @@ export class Ftp {
     // 목록이 550(19·78)인데 파일을 직접 받을 수 있으면 있는 것.
     if ((l.code === 19 || l.code === 78) && (await this.read(path)) !== null) return true
     throw new Stop(`운영 폴더 목록을 확인할 수 없음: ${dir} (curl ${l.code}: ${l.err}) — 있는지 없는지 모르면 진행하지 않음`)
+  }
+
+  /**
+   * 접속 확인: 로그인해서 폴더 하나의 목록을 받아 본다(읽기만). 폴더 내용은 돌려주지 않고 개수만 준다.
+   * exists('/') 는 접속하지 않고 true 를 주므로 접속 확인에 쓰면 안 된다. 결과는 기억하지 않는다(누를 때마다 새로 접속).
+   */
+  async probe(dir: string, seconds = PROBE_SECONDS): Promise<Probe> {
+    const key = dir.replace(/\/+$/, '')
+    const r = await this.curl([this.url(key + '/'), '--list-only', '--connect-timeout', String(Math.min(10, seconds))], seconds)
+    if (!r.ok) {
+      // 화면에 보일 말이다: curl 이 낸 오류 줄(`curl: (67) …`)만 넘긴다. 다른 진단 출력(자세히 보기 모드 등)은 넘기지 않는다.
+      const line = r.err.split('\n').find((x) => /^curl: \(\d+\) /.test(x.trim()))
+      // -1 은 curl 을 띄우지 못했거나(spawn 오류) 시간 안에 끝나지 않아 멈춘 경우다.
+      const spawnError = r.code === -1 && /^spawn /.test(r.err) ? r.err.trim().split('\n')[0] : ''
+      return { ok: false, code: r.code, err: (line ?? spawnError).trim() }
+    }
+    const names = r.out
+      .toString('utf8')
+      .split('\n')
+      .map((x) => x.replace(/\r$/, ''))
+      .filter((x) => x !== '' && x !== '.' && x !== '..')
+    return { ok: true, count: names.length }
   }
 
   /** 운영 파일 → 로컬 파일. 실패하면 false. */

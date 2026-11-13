@@ -37,6 +37,7 @@ import {
   type PanelContext
 } from 'orca'
 import type {
+  ConnVerdict,
   Job,
   JobStep,
   PreflightView,
@@ -81,7 +82,16 @@ const runsNotice = atom<string | null>(null)
  * saved: 마지막으로 불러오거나 저장한 설정(글자). draft 가 이것과 다르면 저장하지 않은 변경이 있는 것이다.
  * session: 편집기를 열 때마다 바뀌는 번호. 늦게 온 응답이 그 사이 연 다른 대상(또는 닫은 편집기)을 덮지 않게 한다.
  */
-type Editing = { session: number; draft: Target; saved: string; previousId: string | null; credUser: string | null; netrc: boolean }
+type Editing = {
+  session: number
+  draft: Target
+  saved: string
+  previousId: string | null
+  credUser: string | null
+  netrc: boolean
+  /** 이 편집기에서 새로 만들거나 가져온 대상: 쓸 수 있게 될 때까지 "다음에 할 일"을 보여 준다. */
+  fresh: boolean
+}
 const editing = atom<Editing | null>(null)
 let editSession = 0
 /** 다른 대상을 고르면 그 순간부터(불러오는 중에도) 앞 편집기의 응답은 받지 않는다. */
@@ -101,6 +111,11 @@ const exported = atom<string | null>(null)
 const editErrors = atom<string[]>([])
 const editNotice = atom<string | null>(null)
 const cred = atom({ user: '', password: '' })
+/**
+ * 접속 정보 칸에 저장하지 않은 입력이 있는가: 저장된 사용자와 다른 사용자, 또는 적어 둔 비밀번호.
+ * 워커는 저장된 계정으로 접속하므로, 이때는 접속 확인을 하지 않고 앞의 결과도 화면의 계정 것으로 보여 주지 않는다.
+ */
+const credDirty = (e: { credUser: string | null }): boolean => read(cred).password !== '' || read(cred).user !== (e.credUser ?? '')
 const mapForm = atom({ local: '', remote: '' })
 const mapSel = atom<string | null>(null)
 const ruleForm = atom({ pattern: '', reason: '' })
@@ -108,6 +123,14 @@ const ruleSel = atom<string | null>(null)
 /** "설정 확인"으로 띄운 plan 작업. */
 /** config: 설정 확인을 시작할 때의 저장된 설정. 결과는 화면의 설정이 이것과 같을 때만 보여 준다. */
 const configCheck = atom<{ jobId: string; target: string; config: string; result: string | null; ok: boolean | null } | null>(null)
+/** 접속 확인 결과. 확인한 그 설정(config)과 그 계정(user)일 때만 맞는 말이다. */
+const connCheck = atom<{ config: string; user: string | null; result: ConnVerdict } | null>(null)
+/** 접속 확인이 도는 편집 세션 번호. */
+const connChecking = atom<number | null>(null)
+/** 설정은 저장했는데 같이 적은 접속 정보는 저장하지 못함(새 대상을 처음 저장할 때). */
+const credFailed = atom(false)
+/** 고급 설정을 펼쳤는가. */
+const advancedOpen = atom(false)
 
 const STEP_LABEL: Record<JobStep, string> = {
   check: '준비 확인',
@@ -337,6 +360,7 @@ function blankTarget(): Target {
     label: '',
     repo: '',
     mainBranch: 'main',
+    // 비워 두면 저장할 때 워커가 기본 위치(플러그인 데이터 폴더 아래, 저장소 밖)를 넣는다.
     runs: '',
     connection: { protocol: 'ftp', host: '', port: 21, root: '/', passive: true },
     mappings: [{ local: 'src/main/webapp', remote: '/' }],
@@ -352,6 +376,10 @@ function newEditSession(): number {
   set(mapSel, null)
   set(ruleSel, null)
   set(configCheck, null)
+  set(connCheck, null)
+  set(connChecking, null)
+  set(credFailed, false)
+  set(advancedOpen, false)
   closeImport()
   set(importNotes, [])
   set(exported, null)
@@ -374,7 +402,7 @@ function closeImport(): void {
 async function editTarget(id: string | null): Promise<void> {
   act()
   const session = newEditSession()
-  if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false })
+  if (!id) return set(editing, { session, draft: blankTarget(), saved: '', previousId: null, credUser: null, netrc: false, fresh: true })
   // 앞 편집기는 여기서 닫는다: 불러오는 동안 앞 대상의 응답·동작이 끼어들 자리를 없앤다.
   set(editing, null)
   set(editLoading, id)
@@ -383,7 +411,7 @@ async function editTarget(id: string | null): Promise<void> {
   if (editSession !== session) return
   set(editLoading, null)
   if (d) {
-    set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc })
+    set(editing, { session, draft: d.target, saved: snapshot(d.target), previousId: id, credUser: d.credUser, netrc: d.netrc, fresh: false })
     set(cred, { user: d.credUser ?? '', password: '' })
   }
 }
@@ -409,7 +437,7 @@ async function importTarget(): Promise<void> {
   if (!r || importGen !== gen || !now || now.text !== im.text) return
   if (!r.draft) return set(importing, { text: now.text, errors: r.errors })
   const session = newEditSession()
-  set(editing, { session, draft: r.draft, saved: '', previousId: null, credUser: null, netrc: false })
+  set(editing, { session, draft: r.draft, saved: '', previousId: null, credUser: null, netrc: false, fresh: true })
   set(importNotes, r.notes)
 }
 
@@ -428,26 +456,70 @@ async function saveEdit(): Promise<void> {
   act()
   const e = read(editing)
   if (!e || read(editBusy)) return
+  const sent = e.draft
+  // 새 대상은 접속 정보 칸에 적어 둔 계정을 설정에 이어서 저장한다. 자격 증명은 대상 이름에 묶이므로 설정이 저장된 뒤에만 쓴다.
+  const typed = read(cred)
+  const withCred = e.previousId === null && typed.user.trim() !== '' && typed.password !== ''
   set(editBusy, true)
-  const r = await ask(() => plugin.request('target.save', plain({ target: e.draft, previousId: e.previousId }))).finally(() => set(editBusy, false))
-  if (!r) return
-  // 응답을 기다리는 사이 편집기가 다른 대상으로 넘어갔거나 닫혔으면, 그 편집 상태는 건드리지 않는다.
-  const here = sameSession(e.session)
-  if (here) set(editErrors, r.errors)
-  if (r.errors.length) return
-  if (here) {
-    const now = read(editing)!
-    // 기다리는 사이 칸을 더 고쳤으면 그 변경은 저장되지 않은 것으로 남긴다. 이름은 저장하면 잠기므로 저장된 이름으로 돌린다.
-    const next: Editing = { ...now, draft: { ...now.draft, id: e.draft.id }, saved: snapshot(e.draft), previousId: e.draft.id }
-    set(editing, next)
-    // 처음 저장한 대상은 접속 정보 칸이 이제야 보인다: 다음에 할 일을 알려 준다.
-    const first = e.previousId === null ? '저장함 — 다음: 아래 접속 정보(FTP 계정)를 저장한 뒤 설정 확인을 누르세요' : '저장함'
-    set(editNotice, isDirty(next) ? null : first)
-    set(importNotes, [])
-    set(exported, null)
+  try {
+    const r = await ask(() => plugin.request('target.save', plain({ target: sent, previousId: e.previousId })))
+    if (!r) return
+    // 응답을 기다리는 사이 편집기가 다른 대상으로 넘어갔거나 닫혔으면, 그 편집 상태는 건드리지 않는다.
+    const here = sameSession(e.session)
+    if (here) {
+      set(editErrors, r.errors)
+      // 잘못된 칸이 접힌 고급 설정 안에 있으면 펼쳐서 보이게 한다.
+      if (r.errors.some((x) => /run 기록 폴더|포트/.test(x))) set(advancedOpen, true)
+    }
+    if (r.errors.length) return
+    // 워커가 채워 저장한 칸(비워 둔 표시 이름·run 기록 폴더)까지 넣은 것이 저장된 설정이다.
+    const saved: Target = { ...sent, label: r.filled?.label ?? sent.label, runs: r.filled?.runs ?? sent.runs }
+    if (here) {
+      const now = read(editing)!
+      // 기다리는 사이 칸을 더 고쳤으면 그 변경은 저장되지 않은 것으로 남긴다. 이름은 저장하면 잠기므로 저장된 이름으로 돌린다.
+      // 워커가 채운 값은 그 칸을 그사이 고치지 않았을 때만 화면에 넣는다.
+      const draft: Target = {
+        ...now.draft,
+        id: sent.id,
+        label: now.draft.label === sent.label ? saved.label : now.draft.label,
+        runs: now.draft.runs === sent.runs ? saved.runs : now.draft.runs
+      }
+      const next: Editing = { ...now, draft, saved: snapshot(saved), previousId: sent.id }
+      set(editing, next)
+      set(editNotice, isDirty(next) ? null : '저장함')
+      set(importNotes, [])
+      set(exported, null)
+    }
+    // 저장은 이미 됐다: 편집기가 어디에 있든 그 대상의 준비 확인·plan 은 버린다.
+    if (read(targetId) === sent.id || read(targetId) === e.previousId) chooseTarget(sent.id, true)
+    // 편집기가 그 대상에 그대로 있을 때만 접속 정보를 이어서 저장한다.
+    if (withCred && sameSession(e.session)) {
+      const c = await ask(() => plugin.request('creds.set', { id: sent.id, user: typed.user, password: typed.password }))
+      if (sameSession(e.session)) {
+        if (c) {
+          update(editing, (now) => (now ? { ...now, credUser: c.user } : now))
+          // 기다리는 사이 계정 칸을 다시 고쳤으면 그 입력은 지우지 않고, 다 저장된 것처럼 말하지도 않는다.
+          const cur = read(cred)
+          const same = cur.user === typed.user && cur.password === typed.password
+          if (same) set(cred, { user: c.user, password: '' })
+          if (read(editNotice))
+            set(
+              editNotice,
+              same
+                ? `설정과 접속 정보를 저장함 (사용자 ${c.user})`
+                : `설정과 접속 정보를 저장함 (사용자 ${c.user}) — 그 뒤에 고친 접속 정보는 아직 저장되지 않음`
+            )
+        } else {
+          // 둘은 한 번에 되돌릴 수 있는 저장이 아니다: 설정은 저장된 채로 두고, 접속 정보만 다시 저장하게 한다.
+          set(editNotice, null)
+          set(credFailed, true)
+        }
+      }
+    }
+  } finally {
+    set(editBusy, false)
   }
-  // 저장은 이미 됐다: 편집기가 어디에 있든 그 대상의 준비 확인·plan 은 버리고 목록을 다시 읽는다.
-  if (read(targetId) === e.draft.id || read(targetId) === e.previousId) chooseTarget(e.draft.id, true)
+  // 목록을 다시 읽는다(저장에 성공했을 때만 여기까지 온다).
   await loadTargets()
 }
 
@@ -484,8 +556,33 @@ async function saveCred(): Promise<void> {
   update(editing, (now) => (now ? { ...now, credUser: r.user } : now))
   // 기다리는 사이 계정 칸을 다시 고쳤으면 그 입력은 지우지 않는다.
   const typed = read(cred)
-  if (typed.user === c.user && typed.password === c.password) set(cred, { user: r.user, password: '' })
-  set(editNotice, `접속 정보 저장함 (사용자 ${r.user})`)
+  const same = typed.user === c.user && typed.password === c.password
+  if (same) set(cred, { user: r.user, password: '' })
+  set(editNotice, same ? `접속 정보 저장함 (사용자 ${r.user})` : `접속 정보 저장함 (사용자 ${r.user}) — 그 뒤에 고친 접속 정보는 아직 저장되지 않음`)
+  set(credFailed, false)
+  // 앞의 접속 확인은 바뀌기 전 계정으로 한 것이다.
+  set(connCheck, null)
+}
+
+/**
+ * 접속 확인: 저장된 설정·저장된 접속 정보로 로그인해 운영 루트 목록만 받아 본다(운영 읽기). 사람이 누를 때만 접속한다.
+ * 워커는 저장된 것으로 확인하므로, 화면에 저장하지 않은 설정이나 적어만 둔 비밀번호가 있으면 하지 않는다.
+ */
+async function startConnCheck(): Promise<void> {
+  act()
+  const e = read(editing)
+  if (!e?.previousId || isDirty(e) || read(editBusy) || credDirty(e) || (!e.credUser && !e.netrc)) return
+  const config = e.saved
+  const user = e.credUser
+  set(editBusy, true)
+  set(connCheck, null)
+  set(connChecking, e.session)
+  const r = await ask(() => plugin.request('conn.check', { id: e.previousId! })).finally(() => {
+    set(editBusy, false)
+    if (read(connChecking) === e.session) set(connChecking, null)
+  })
+  // 다른 대상으로 넘어갔으면 이 결과는 그 편집기의 것이 아니다.
+  if (r && sameSession(e.session)) set(connCheck, { config, user, result: r })
 }
 
 async function startConfigCheck(): Promise<void> {
@@ -1156,6 +1253,59 @@ function ImportCard() {
   )
 }
 
+/**
+ * 대상을 쓸 수 있게 되기까지의 순서와 지금 할 일. 새로 만들거나 가져온 대상, 접속 정보가 없는 대상에만 보여 준다.
+ * 접속 확인·설정 확인은 이 편집기에서 확인한 것만 끝난 것으로 친다(결과를 따로 저장하지 않는다).
+ */
+function SetupGuide(props: { e: Editing; typedCred: boolean; connOk: boolean; checkOk: boolean }) {
+  const { e } = props
+  const isNew = !e.previousId
+  const hasCommit = !!e.draft.checkCommit
+  const steps: { done: boolean; label: string; hint: string; skip?: boolean }[] = [
+    {
+      done: !isNew && !isDirty(e),
+      label: '설정 저장',
+      hint: !isNew
+        ? '바꾼 내용이 있습니다 — 맨 아래 설정 저장'
+        : props.typedCred
+          ? "맨 아래 '설정과 접속 정보 저장'"
+          : '칸을 확인하고, 접속 정보(FTP 계정)도 적은 뒤 맨 아래에서 저장'
+    },
+    {
+      done: !!e.credUser || e.netrc,
+      label: '접속 정보(FTP 계정) 저장',
+      hint: isNew ? '접속 정보 칸에 적어 두면 설정과 함께 저장됩니다' : '접속 정보 칸에 적고 접속 정보 저장'
+    },
+    { done: props.connOk, label: '접속 확인', hint: '접속 정보 칸의 접속 확인 버튼 — 주소와 계정이 맞는지 봅니다(운영 읽기)' },
+    {
+      done: props.checkOk,
+      label: '설정 확인',
+      hint: hasCommit ? '맨 아래 설정 확인 버튼 — 경로 매핑이 맞는지 봅니다(운영 읽기)' : '확인용 커밋이 없어 건너뜁니다(넣으면 경로 매핑까지 확인할 수 있음)',
+      skip: !hasCommit
+    }
+  ]
+  const current = steps.findIndex((s) => !s.done && !s.skip)
+  if (current < 0)
+    return (
+      <Callout tone="success" icon="check" title={hasCommit ? '준비 끝' : '접속까지 확인함'}>
+        {hasCommit
+          ? '반영 탭에서 이 대상을 고르고 쓰면 됩니다.'
+          : '주소와 계정은 맞습니다. 경로 매핑은 확인하지 않았습니다(확인용 커밋 없음) — 첫 반영 때 반영 목록의 운영 경로를 꼭 보세요.'}
+      </Callout>
+    )
+  return (
+    <Callout tone="accent" title="다음에 할 일" icon="info">
+      <Stack gap="xs">
+        {steps.map((s, i) => (
+          <Text key={`g${i}`} size="xs" muted={i !== current}>
+            {s.done ? `✔ ${s.label}` : i === current ? `▶ ${s.label} — ${s.hint}` : s.skip ? `· ${s.label} — ${s.hint}` : `· ${s.label}`}
+          </Text>
+        ))}
+      </Stack>
+    </Callout>
+  )
+}
+
 function TargetEditor() {
   const e = read(editing)!
   const t = e.draft
@@ -1173,6 +1323,21 @@ function TargetEditor() {
   const ccRunning = !!ccJob && (ccJob.state === 'running' || ccJob.state === 'starting')
   // 확인 결과는 화면의 설정이 확인한 그 설정일 때만 맞는 말이다.
   const ccCurrent = !!cc && !dirty && cc.config === e.saved
+  const hasCred = !!e.credUser || e.netrc
+  const typedCred = read(cred).user.trim() !== '' && read(cred).password !== ''
+  const conn = read(connCheck)
+  // 접속 확인 결과도 같다: 확인한 그 설정, 그 계정일 때만.
+  const unsavedCred = !!e.previousId && credDirty(e)
+  const connCurrent = !!conn && !dirty && !unsavedCred && conn.config === e.saved && conn.user === e.credUser
+  const connOk = connCurrent && conn?.result.result === 'ok'
+  // 접속 확인을 누를 수 없는 이유(누를 수 있으면 null). 워커는 저장된 설정·저장된 계정으로 접속한다.
+  const connBlocked = dirty
+    ? '저장하지 않은 변경이 있음 — 설정 저장 후 접속 확인'
+    : unsavedCred
+      ? '저장하지 않은 접속 정보가 있음 — 접속 정보 저장 후 접속 확인'
+      : !hasCred
+        ? '접속 정보를 먼저 저장하세요'
+        : null
   return (
     <Stack gap="md">
       {errors.length > 0 && (
@@ -1195,79 +1360,117 @@ function TargetEditor() {
                 {`· ${x}`}
               </Text>
             ))}
-            <Text size="xs" muted>
-              다음: ① 메인 체크아웃 확인 → ② 맨 아래 설정 저장 → ③ 접속 정보(FTP 계정) 저장 → ④ 설정 확인
-            </Text>
           </Stack>
         </Callout>
       )}
+      {(e.fresh || !hasCred) && <SetupGuide e={e} typedCred={typedCred} connOk={connOk} checkOk={ccCurrent && cc?.ok === true} />}
 
-      <Card title="대상" description="저장소와 run 기록 위치">
+      <Card title="대상" description="저장소와 확인용 커밋">
         <Stack gap="md">
+          <Row gap="xs">
+            <Badge tone={t.test ? 'neutral' : 'warning'}>{t.test ? '시험용 대상' : '운영 대상'}</Badge>
+          </Row>
           <TextField
             label={e.previousId ? '이름 (만든 뒤에는 바꿀 수 없음 — run 기록이 이름에 묶임)' : '이름 (영문 소문자·숫자·_)'}
             value={t.id}
             disabled={!!e.previousId}
             onChange={(v) => patch((x) => ({ ...x, id: v.trim() }))}
           />
-          <TextField label="표시 이름" value={t.label} onChange={(v) => patch((x) => ({ ...x, label: v }))} />
+          <TextField
+            label="표시 이름"
+            value={t.label}
+            placeholder="비워 두면 이름과 같게"
+            onChange={(v) => patch((x) => ({ ...x, label: v }))}
+          />
           <TextField label="메인 체크아웃" value={t.repo} placeholder="C:/work/repos/my-app" onChange={(v) => patch((x) => ({ ...x, repo: v.trim() }))} />
-          <TextField label="main 브랜치" value={t.mainBranch ?? 'main'} onChange={(v) => patch((x) => ({ ...x, mainBranch: v.trim() }))} />
-          <TextField label="run 기록 폴더" value={t.runs} placeholder="C:/work/repos/my-app/.local/deploy" onChange={(v) => patch((x) => ({ ...x, runs: v.trim() }))} />
           <TextField
             label="확인용 커밋 (이미 반영된 커밋)"
             value={t.checkCommit ?? ''}
             onChange={(v) => patch((x) => ({ ...x, checkCommit: v.trim() || undefined }))}
           />
-          <Switch label="시험용 대상 (자동 선택 안 함)" checked={!!t.test} onChange={(v) => patch((x) => ({ ...x, test: v || undefined }))} />
         </Stack>
       </Card>
 
-      <Card title="연결 (FTP)" description="운영 서버 주소와 운영 루트">
+      <Card title="연결 (FTP)" description="운영 서버 주소와 운영 루트. 포트·패시브 모드는 아래 고급 설정에 있습니다.">
         <Stack gap="md">
-          <Box direction="row" gap="xs">
-            <Box grow>
-              <TextField label="호스트" value={c.host} onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, host: v.trim() } }))} />
-            </Box>
-            <Box width={88} shrink={false}>
-              <TextField
-                label="포트"
-                value={String(c.port ?? 21)}
-                onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, port: Number(v) || 21 } }))}
-              />
-            </Box>
-          </Box>
+          <TextField label="호스트" value={c.host} onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, host: v.trim() } }))} />
           <TextField label="운영 루트" value={c.root} placeholder="/webapps/ROOT" onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, root: v.trim() } }))} />
-          <Switch
-            label="패시브 모드"
-            checked={c.passive !== false}
-            onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, passive: v } }))}
-          />
         </Stack>
       </Card>
 
-      {e.previousId && (
-        <Card title="접속 정보" description={`Windows 자격 증명 관리자 prod-deploy:${e.previousId}`}>
-          <Stack gap="sm">
-            <Text size="xs" muted>
-              {e.credUser
+      <Card
+        title="접속 정보"
+        description={
+          e.previousId
+            ? `Windows 자격 증명 관리자 prod-deploy:${e.previousId}`
+            : '설정을 저장할 때 Windows 자격 증명 관리자에 같이 저장됩니다. 설정 파일과 내보낸 글자에는 들어가지 않습니다.'
+        }
+      >
+        <Stack gap="sm">
+          <Text size="xs" muted>
+            {!e.previousId
+              ? "FTP 계정을 지금 적어 두면 맨 아래 저장 버튼이 설정과 함께 저장합니다. 비워 두면 설정만 저장합니다."
+              : e.credUser
                 ? `저장돼 있음 (사용자 ${e.credUser})`
                 : e.netrc
                   ? '자격 증명 관리자에 없음 — 지금은 옮기는 동안의 netrc 로 접속'
                   : '없음 — 저장해야 접속할 수 있음'}
+          </Text>
+          {read(credFailed) && (
+            <Callout tone="warning" icon="warning">
+              설정은 저장했지만 접속 정보는 저장하지 못했습니다. 여기서 다시 저장하세요.
+            </Callout>
+          )}
+          <Box columns={2} gap="xs">
+            <Input label="사용자" value={read(cred).user} onChange={(v) => set(cred, { ...read(cred), user: v })} />
+            <Input label="비밀번호" type="password" value={read(cred).password} onChange={(v) => set(cred, { ...read(cred), password: v })} />
+          </Box>
+          {unsavedCred && (
+            <Text size="xs" muted>
+              칸에 적은 접속 정보는 아직 저장되지 않았습니다. 접속 확인과 반영은 저장된 접속 정보로 합니다.
             </Text>
-            <Box columns={2} gap="xs">
-              <Input label="사용자" value={read(cred).user} onChange={(v) => set(cred, { ...read(cred), user: v })} />
-              <Input label="비밀번호" type="password" value={read(cred).password} onChange={(v) => set(cred, { ...read(cred), password: v })} />
-            </Box>
+          )}
+          {e.previousId && (
             <Box direction="row" justify="end">
               <Button icon="check" size="sm" disabled={!read(cred).user.trim() || !read(cred).password || busyEdit} onPress={saveCred}>
                 접속 정보 저장
               </Button>
             </Box>
-          </Stack>
-        </Card>
-      )}
+          )}
+          {e.previousId && (
+            <>
+              <Separator />
+              <Text size="xs" muted>
+                {`접속 확인: 저장된 계정으로 ${c.host}:${c.port ?? 21} 에 로그인해 운영 루트(${c.root})의 목록만 받아 봅니다(운영 읽기). 누를 때만 접속합니다.`}
+              </Text>
+              <Button icon="play" variant="outline" disabled={!!connBlocked || busyEdit} onPress={startConnCheck}>
+                {connBlocked ?? '접속 확인 (운영 읽기)'}
+              </Button>
+              {read(connChecking) === e.session && <Spinner label="접속 확인 중 (FTP 응답은 20초까지 기다림)" />}
+              {conn && connCurrent && (
+                <Callout
+                  tone={conn.result.result === 'ok' ? 'success' : conn.result.result === 'empty' ? 'warning' : 'danger'}
+                  icon={conn.result.result === 'ok' ? 'check' : conn.result.result === 'empty' ? 'warning' : 'error'}
+                  title={conn.result.result === 'ok' ? '접속됨' : conn.result.result === 'empty' ? '접속됨 — 운영 루트 확인 필요' : '접속 확인 실패'}
+                >
+                  <Stack gap="xs">
+                    {conn.result.message.split('\n').map((x, i) => (
+                      <Text key={`cm${i}`} size="xs">
+                        {x}
+                      </Text>
+                    ))}
+                  </Stack>
+                </Callout>
+              )}
+              {conn && !connCurrent && (
+                <Text size="xs" muted>
+                  설정이나 접속 정보가 바뀌어서(저장하지 않은 입력 포함) 앞의 접속 확인 결과는 보여 주지 않습니다. 저장한 뒤 다시 확인하세요.
+                </Text>
+              )}
+            </>
+          )}
+        </Stack>
+      </Card>
 
       <Card title="경로 매핑" description="저장소 폴더 → 운영 루트 아래 폴더. 가장 구체적인 매핑을 씁니다.">
         <Stack gap="sm">
@@ -1428,14 +1631,54 @@ function TargetEditor() {
         </Stack>
       </Card>
 
+      <Collapsible
+        title="고급 설정"
+        description={[
+          `main 브랜치 ${t.mainBranch || 'main'}`,
+          `포트 ${c.port ?? 21}`,
+          c.passive !== false ? '패시브 모드' : '액티브 모드',
+          t.test ? '시험용' : '운영용',
+          `run 기록 ${t.runs || '기본 위치'}`
+        ].join(' · ')}
+        open={read(advancedOpen)}
+        onChange={(v) => set(advancedOpen, v)}
+      >
+        <Stack gap="md">
+          <Text size="xs" muted>
+            보통은 바꿀 일이 없는 칸입니다.
+          </Text>
+          <TextField label="main 브랜치" value={t.mainBranch ?? 'main'} onChange={(v) => patch((x) => ({ ...x, mainBranch: v.trim() }))} />
+          <TextField
+            label="포트"
+            value={String(c.port ?? 21)}
+            onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, port: Number(v) || 21 } }))}
+          />
+          <Switch
+            label="패시브 모드"
+            checked={c.passive !== false}
+            onChange={(v) => patch((x) => ({ ...x, connection: { ...x.connection, passive: v } }))}
+          />
+          <TextField
+            label={e.previousId ? 'run 기록 폴더' : 'run 기록 폴더 (비워 두면 플러그인 데이터 폴더 아래, 저장소 밖)'}
+            value={t.runs}
+            placeholder={e.previousId ? '' : '~/.prod-deploy/runs/<이름>'}
+            onChange={(v) => patch((x) => ({ ...x, runs: v.trim() }))}
+          />
+          <Text size="xs" muted>
+            run 기록 폴더에는 운영 파일 백업이 쌓입니다. 저장소 안에 두려면 git 에서 빼 둔 폴더여야 합니다.
+          </Text>
+          <Switch label="시험용 대상 (자동 선택 안 함)" checked={!!t.test} onChange={(v) => patch((x) => ({ ...x, test: v || undefined }))} />
+        </Stack>
+      </Collapsible>
+
       {dirty && e.previousId && (
         <Text size="xs" muted>
-          저장하지 않은 변경이 있습니다. 설정 확인과 반영은 저장된 설정으로 합니다.
+          저장하지 않은 변경이 있습니다. 접속 확인·설정 확인과 반영은 저장된 설정으로 합니다.
         </Text>
       )}
       <Box direction="row" gap="xs" justify="between" align="center">
         <Button icon="check" disabled={busyEdit} onPress={saveEdit}>
-          설정 저장
+          {!e.previousId && typedCred ? '설정과 접속 정보 저장' : '설정 저장'}
         </Button>
         {e.previousId && (
           <Button icon="delete" variant="ghost" tone="danger" disabled={busyEdit} onPress={deleteEdit}>

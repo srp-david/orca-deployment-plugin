@@ -7,12 +7,14 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { OrcaWorkerApi } from 'orca/worker'
 import { credentialUser, deleteCredential, writeCredential } from './engine/creds.ts'
+import { Ftp, PROBE_SECONDS, resolveAuth, type FtpAuth } from './engine/ftp.ts'
 import { gitText, mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
 import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
 import { exportChecked, parseShared, repoIdentity, sameRepoIdentity, sharedToTarget } from './engine/share.ts'
 import {
+  defaultRuns,
   deleteTarget,
   detectTarget,
   gitRemote,
@@ -20,15 +22,17 @@ import {
   loadTarget,
   mainBranch,
   netrcPath,
+  prepareSave,
   repoProblem,
   saveTarget,
   validateTarget,
   type Target
 } from './engine/target.ts'
-import { exec, home, Stop, toNative } from './engine/util.ts'
+import { exec, Stop, toNative } from './engine/util.ts'
 import { logTail, viewRun } from './engine/view.ts'
 import { cliSpawnError } from './cli-spawn.ts'
 import { configVerdict } from './config-verdict.ts'
+import { connVerdict, type ConnVerdict } from './conn-verdict.ts'
 import { openPanel } from './open-panel.ts'
 import type { RecentPr, RunSummary, TargetSummary, Workspace } from './protocol.ts'
 
@@ -225,15 +229,46 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('target.save', ({ target, previousId }) =>
     guard(() => {
-      const errors = validateTarget(target)
+      // 비워 둔 표시 이름·(새 대상의) run 기록 폴더는 기본값으로 채워 저장한다.
+      const { target: t, errors } = prepareSave(target, !previousId)
       if (errors.length) return { errors }
       // run 이름과 기록 위치가 대상 이름에 묶여 있어, 이름을 바꾸면 이미 올린 run 을 되돌릴 길이 끊긴다.
-      if (previousId && previousId !== target.id)
+      if (previousId && previousId !== t.id)
         return { errors: ['대상 이름은 바꿀 수 없음 — 새 대상으로 만들고 이 대상을 지우세요'] }
-      if (!previousId && listTargets().some((t) => t.id === target.id))
-        return { errors: [`같은 이름의 대상이 이미 있음: ${target.id}`] }
-      saveTarget(target)
-      return { errors: [] }
+      if (!previousId && listTargets().some((x) => x.id === t.id))
+        return { errors: [`같은 이름의 대상이 이미 있음: ${t.id}`] }
+      saveTarget(t)
+      return { errors: [], filled: { label: t.label, runs: t.runs } }
+    })
+  )
+
+  /** 접속 확인이 도는 대상. 같은 대상에 두 번 겹쳐 접속하지 않는다. */
+  const probing = new Set<string>()
+
+  // 접속 확인은 워커가 직접 한다(ADR 0002 의 CLI 작업이 아님): 읽기 한 번이고 시간 제한이 짧아서,
+  // 워커가 다시 시작돼 끊겨도 다시 누르면 된다. 사람이 누를 때만 접속하고, 폴더 내용은 돌려주지 않는다.
+  orca.panels.handle('conn.check', ({ id }) =>
+    guard(async (): Promise<ConnVerdict> => {
+      const t = loadTarget(id)
+      const busy = listJobs().find((j) => j.target === id && (j.state === 'running' || j.state === 'starting'))
+      if (busy) throw new Stop(`${id} 에서 ${LABEL[busy.step]} 작업이 도는 중 — 끝난 뒤 다시 누르세요`)
+      if (probing.has(id)) throw new Stop(`${id} 접속 확인이 이미 도는 중`)
+      probing.add(id)
+      try {
+        let auth: FtpAuth
+        try {
+          auth = await resolveAuth(t)
+        } catch (e) {
+          if (e instanceof Stop) return { result: 'failed', message: e.message }
+          throw e
+        }
+        const p = await new Ftp(t, auth).probe(t.connection.root, PROBE_SECONDS)
+        const v = connVerdict(t, p, PROBE_SECONDS)
+        orca.log(`접속 확인 ${id}: ${v.result}${p.ok ? '' : ` (curl ${p.code})`}`)
+        return v
+      } finally {
+        probing.delete(id)
+      }
     })
   )
 
@@ -392,7 +427,7 @@ export default function activate(orca: OrcaWorkerApi): void {
         } else notes.push('메인 체크아웃 경로를 직접 넣으세요(지금 작업공간에서 저장소를 찾지 못했습니다).')
       }
       // run 기록에는 운영 백업이 쌓인다. 저장소 안에 두면 실수로 커밋될 수 있어 기본은 플러그인 데이터 폴더 아래다.
-      const runs = join(home(), 'runs', shared.id).replace(/\\/g, '/')
+      const runs = defaultRuns(shared.id)
       const inside = repo !== '' && (runs.toLowerCase() + '/').startsWith(repo.toLowerCase().replace(/\/+$/, '') + '/')
       notes.push(
         inside

@@ -11,6 +11,7 @@ src/worker.ts        플러그인 워커. 짧은 일은 엔진을 직접, 운영
 src/panel.tsx        패널(Orca components)
 src/protocol.ts      패널↔워커 요청·이벤트 약속
 src/config-verdict.ts  "설정 확인" 판정(패널·워커가 같이 씀, Node API 없음)
+src/conn-verdict.ts    "접속 확인" 결과(curl 종료 코드)를 사람이 읽을 말로
 src/open-panel.ts    상태 표시줄 → 패널 열기(Orca CLI `orca plugin open`)
 skill/               Claude Code 스킬과 확인 훅, 설치 스크립트
 examples/            대상 설정 예시
@@ -22,7 +23,7 @@ TypeScript 는 빌드하지 않습니다. Node 24 의 타입 제거로 바로 �
 ## 시험
 
 ```powershell
-node --test test/*.spec.ts   # 엔진 단위·안전 회귀·스킬 훅·패널 열기·설정 확인 판정
+node --test test/*.spec.ts   # 엔진 단위·안전 회귀·스킬 훅·패널 열기·설정 확인·접속 확인 판정
 orca plugin test .           # 패널·워커(mock host)
 orca plugin check .          # 패널을 워커와 함께 한 번 그리기
 node test/e2e.ts             # 임시 저장소 + 시험 FTP 로 CLI 전체 흐름

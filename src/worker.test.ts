@@ -1,9 +1,10 @@
 // 워커 핸들러를 mock host 로: 대상 설정 저장·검사, 작업공간으로 대상 찾기, 잘못된 요청 거절.
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
+import { writeJob } from './engine/jobs.ts'
 import * as main from './worker.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'pd-worker-')).replace(/\\/g, '/')
@@ -286,5 +287,64 @@ test('대상 가져오기: origin 이 다른 저장소인 폴더(upstream 만 �
   const r = await worker.request('target.import', { text: text.replace('"id": "app"', '"id": "app5"') })
   assert.equal(r.draft!.repo, '', JSON.stringify(r.notes))
   assert.ok(r.notes.some((n) => n.includes('받아 둔 작업공간을 Orca 에서 찾지 못했습니다')))
+  await worker.deactivate()
+})
+
+test('대상 저장: 비워 둔 표시 이름은 대상 이름으로, 새 대상의 비워 둔 run 기록 폴더는 저장소 밖 기본 위치로 채운다', async () => {
+  const worker = await mountWorker(main, { host: host([]) })
+  const file = `${home}/home/targets/dflt.json`
+  const r = await worker.request('target.save', { target: { ...target, id: 'dflt', label: ' ', runs: '' }, previousId: null })
+  assert.deepEqual(r.errors, [])
+  assert.deepEqual(r.filled, { label: 'dflt', runs: `${home}/home/runs/dflt` })
+  const saved = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(saved.label, 'dflt')
+  assert.equal(saved.runs, `${home}/home/runs/dflt`)
+  assert.ok(!saved.runs.toLowerCase().startsWith(repo.toLowerCase() + '/'), '기본 위치는 저장소 밖이다')
+  // 적어 둔 값은 건드리지 않는다
+  const kept = await worker.request('target.save', { target: { ...saved, label: 'Default', runs: `${home}/elsewhere` }, previousId: 'dflt' })
+  assert.deepEqual(kept.filled, { label: 'Default', runs: `${home}/elsewhere` })
+  // 이미 있는 대상의 run 기록 폴더는 비워도 채우지 않는다(쌓인 run 의 위치가 모르는 사이 바뀌지 않게)
+  const again = await worker.request('target.save', { target: { ...saved, runs: '' }, previousId: 'dflt' })
+  assert.ok(again.errors.some((e: string) => e.includes('run 기록 폴더')), JSON.stringify(again.errors))
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).runs, `${home}/elsewhere`)
+  // 이름이 틀려서 채우지 못한 칸은 따로 탓하지 않는다
+  const bad = await worker.request('target.save', { target: { ...target, id: 'Bad-Name', label: '', runs: '' }, previousId: null })
+  assert.equal(bad.errors.length, 1, JSON.stringify(bad.errors))
+  assert.ok(bad.errors[0].includes('대상 이름은'))
+  await worker.deactivate()
+})
+
+test('접속 확인: 접속 정보가 없으면 접속하지 않고 그렇게 알려 주고, 작업이 도는 대상에는 하지 않는다', async () => {
+  writeFileSync(`${home}/home/targets/nocred_zz9.json`, JSON.stringify({ ...target, id: 'nocred_zz9' }))
+  const worker = await mountWorker(main, { host: host([]) })
+  const r = await worker.request('conn.check', { id: 'nocred_zz9' })
+  assert.equal(r.result, 'failed')
+  assert.match(r.message, /접속 정보 없음/)
+  // 워커를 띄운 뒤에 남긴 기록이라 워커가 지켜보지는 않는다
+  const job = {
+    id: 'busyzz9',
+    step: 'upload' as const,
+    target: 'nocred_zz9',
+    run: null,
+    spec: null,
+    state: 'running' as const,
+    message: null,
+    progress: null,
+    lines: [],
+    startedAt: Date.now(),
+    endedAt: null,
+    pid: process.pid,
+    beat: Date.now()
+  }
+  assert.ok(writeJob(job))
+  let refused = ''
+  try {
+    await worker.request('conn.check', { id: 'nocred_zz9' })
+  } catch (e) {
+    refused = String((e as Error).message)
+  } finally {
+    rmSync(`${home}/home/jobs/busyzz9.json`)
+  }
+  assert.match(refused, /업로드 작업이 도는 중/)
   await worker.deactivate()
 })

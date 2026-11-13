@@ -3,8 +3,9 @@ import type { Job, JobStep } from './engine/jobs.ts'
 import type { CheckItem, PrInfo } from './engine/plan.ts'
 import type { Target } from './engine/target.ts'
 import type { RunView } from './engine/view.ts'
+import type { ConnVerdict } from './conn-verdict.ts'
 
-export type { CheckItem, Job, JobStep, PrInfo, RunView, Target }
+export type { CheckItem, ConnVerdict, Job, JobStep, PrInfo, RunView, Target }
 
 export type TargetSummary = {
   id: string
@@ -69,8 +70,19 @@ declare module 'orca' {
   interface PluginRequests {
     'targets.list': { output: TargetSummary[] }
     'target.get': { input: { id: string }; output: TargetDetail }
-    /** 검사를 통과하면 저장. 잘못이 있으면 그 목록을 돌려준다. */
-    'target.save': { input: { target: Target; previousId: string | null }; output: { errors: string[] } }
+    /**
+     * 검사를 통과하면 저장. 잘못이 있으면 그 목록을 돌려준다.
+     * 비워 둔 표시 이름은 대상 이름으로, 새 대상의 비워 둔 run 기록 폴더는 기본 위치로 채워 저장한다. filled 는 그렇게 채운 값.
+     */
+    'target.save': {
+      input: { target: Target; previousId: string | null }
+      output: { errors: string[]; filled?: { label: string; runs: string } }
+    }
+    /**
+     * 접속 확인: 저장된 설정과 저장된 접속 정보로 로그인해 운영 루트의 목록을 받아 본다(운영 읽기만, 사람이 누를 때만).
+     * 성공은 로그인과 목록 조회까지를 뜻한다. 폴더 내용은 돌려주지 않는다.
+     */
+    'conn.check': { input: { id: string }; output: ConnVerdict }
     'target.delete': { input: { id: string }; output: null }
     'target.validate': { input: { target: Target }; output: { errors: string[] } }
     /** 팀이 같이 쓰는 설정만 담은 글자. 개인 경로·접속 정보·빌드 명령은 들어가지 않는다. */

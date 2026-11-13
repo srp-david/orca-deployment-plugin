@@ -155,6 +155,37 @@ const ID = /^[a-z0-9_]+$/
 /** 서버 이름·IPv4 주소: 글자·숫자·`.`·`-`·`_` 만, 양 끝은 글자나 숫자. */
 const HOST = /^(?=.{1,253}$)[A-Za-z0-9_]([A-Za-z0-9._-]*[A-Za-z0-9_])?$/
 
+const NEED_LABEL = '표시 이름이 필요함'
+const NEED_RUNS = 'run 기록 폴더가 필요함'
+
+/**
+ * 새 대상의 run 기록 폴더 기본 위치: 플러그인 데이터 폴더 아래(저장소 밖).
+ * run 기록에는 운영 파일 백업이 쌓여서, 저장소 안에 두면 실수로 커밋될 수 있다.
+ */
+export function defaultRuns(id: string): string {
+  return join(home(), 'runs', id).replace(/\\/g, '/')
+}
+
+const blank = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && v.trim() === '')
+
+/**
+ * 패널에서 저장할 때: 비워 둔 칸을 기본값으로 채운 설정과 그 설정의 잘못 목록.
+ * 표시 이름 → 대상 이름, (새 대상만) run 기록 폴더 → defaultRuns. 이미 있는 대상의 run 기록 폴더는 채우지 않는다 —
+ * 이미 쌓인 run 의 위치가 모르는 사이 바뀌면 안 된다.
+ * 대상 이름이 틀리면 채울 값이 없다. 그때는 못 채운 칸을 따로 탓하지 않는다(이름을 고치면 채워진다).
+ */
+export function prepareSave(t: Target, isNew: boolean): { target: Target; errors: string[] } {
+  if (!t || typeof t !== 'object') return { target: t, errors: validateTarget(t) }
+  const noLabel = blank(t.label)
+  const noRuns = isNew && blank(t.runs)
+  if (typeof t.id !== 'string' || !ID.test(t.id)) {
+    const skip = new Set([...(noLabel ? [NEED_LABEL] : []), ...(noRuns ? [NEED_RUNS] : [])])
+    return { target: t, errors: validateTarget(t).filter((x) => !skip.has(x)) }
+  }
+  const target: Target = { ...t, label: noLabel ? t.id : t.label, runs: noRuns ? defaultRuns(t.id) : t.runs }
+  return { target, errors: validateTarget(target) }
+}
+
 /** 설정의 잘못을 사람이 읽을 문장으로. 빈 배열이면 쓸 수 있다. */
 export function validateTarget(t: Target): string[] {
   const e: string[] = []
@@ -164,9 +195,9 @@ export function validateTarget(t: Target): string[] {
   const dotDot = (p: string) => /(^|[\\/])\.\.([\\/]|$)/.test(p)
   const absolute = (p: string) => /^[a-zA-Z]:|^[\\/]/.test(p)
   if (typeof t.id !== 'string' || !ID.test(t.id)) e.push('대상 이름은 영문 소문자·숫자·_ 만 (run 이름 앞부분이라 - 는 못 씀)')
-  if (!filled(t.label)) e.push('표시 이름이 필요함')
+  if (!filled(t.label)) e.push(NEED_LABEL)
   if (!filled(t.repo)) e.push('메인 체크아웃 경로가 필요함')
-  if (!filled(t.runs)) e.push('run 기록 폴더가 필요함')
+  if (!filled(t.runs)) e.push(NEED_RUNS)
   const c = t.connection
   if (!c || typeof c !== 'object') e.push('연결 설정이 필요함')
   else {
