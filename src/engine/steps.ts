@@ -30,6 +30,12 @@ function stop(run: Run, h: StepHooks, msg: string): never {
   throw e
 }
 
+/** 백업 정리로 백업을 지운 run 은 다시 백업·업로드·되돌리기를 하지 않는다(ADR 0006). */
+function assertBackupKept(run: Run, h: StepHooks, what: string): void {
+  const at = run.backupPruned()
+  if (at) stop(run, h, `백업 지움(${at}, 백업 정리) — ${what}`)
+}
+
 function assertUsable(run: Run, h: StepHooks): void {
   const errors = run.errors()
   if (errors.length) stop(run, h, `막힌 run — ${errors[0]}${errors.length > 1 ? ` 외 ${errors.length - 1}건` : ''}`)
@@ -124,6 +130,7 @@ export async function backup(id: string, h: StepHooks = {}): Promise<void> {
     const log = logger(run, h)
     assertUsable(run, h)
     if (run.uploadBegun()) stop(run, h, '이미 업로드를 시작한 run — 백업을 다시 받지 않음')
+    assertBackupKept(run, h, '오래된 run 이라 다시 백업하지 않음. 새로 plan')
     if (configChanged(run)) stop(run, h, '대상 설정이 plan 이후 바뀜 — 새로 plan')
     run.remove('backup.done')
     const tmp = run.path('backup.tmp')
@@ -225,6 +232,7 @@ export async function upload(id: string, code: string, yes: boolean, h: StepHook
     if (run.has('rollback.done')) stop(run, h, '되돌린 run — 다시 올리려면 새로 plan')
     if (run.has('upload.done')) stop(run, h, '이미 올린 run — 다시 올리려면 새로 plan')
     if (run.uploadBegun()) stop(run, h, '부분 업로드된 run — 이어 올리지 않음. 되돌린 뒤 새로 plan')
+    assertBackupKept(run, h, '오래된 run 이라 올리지 않음. 새로 plan')
     if (!run.has('backup.done')) stop(run, h, `백업 먼저(backup ${run.id})`)
     if (configChanged(run)) stop(run, h, '대상 설정이 plan 이후 바뀜 — 새로 plan')
     checkBackup(run, h)
@@ -329,6 +337,7 @@ export async function rollback(id: string, code: string, yes: boolean, h: StepHo
     const log = logger(run, h)
     assertUsable(run, h)
     checkCode(run, h, code, yes)
+    assertBackupKept(run, h, '되돌릴 수 없음(손으로 확인)')
     if (!run.has('backup.done')) stop(run, h, '백업 없음')
     if (run.has('rollback.done')) stop(run, h, '이미 되돌린 run')
     if (!run.uploadBegun()) stop(run, h, '올린 적 없는 run — 되돌릴 것이 없음')

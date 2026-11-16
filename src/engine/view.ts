@@ -34,6 +34,8 @@ export type RunView = {
   uploaded: number
   total: number
   backupDir: string | null
+  /** 백업 정리로 백업 파일을 지운 시각. 지운 run 은 되돌리기·업로드를 하지 않는다. */
+  backupPruned: string | null
   /** 지금 이 대상에서 다른 단계가 돌고 있으면 그 설명. */
   busy: string | null
   /** run 에 남은 대상 설정이 지금 설정과 다름: 백업·업로드는 막히고, 되돌리기는 이 run 의 주소(host/root)로 한다. */
@@ -87,7 +89,8 @@ export function viewRun(run: Run): RunView {
     hasClass: rows.some((r) => r.local.endsWith('.class')),
     uploaded: status === 'uploaded' || status === 'verified' ? rows.length : run.uploadedCount(),
     total: rows.length,
-    backupDir: run.has('backup.done') ? run.path('backup') : null,
+    backupDir: run.has('backup.done') && !run.backupPruned() ? run.path('backup') : null,
+    backupPruned: run.backupPruned(),
     busy: lock ? `${lock.step} ${lock.run} (${lock.by}, ${lock.startedAt}부터)` : null,
     configChanged: configChanged(run),
     staleLock: staleOf(run.target.id),
@@ -119,7 +122,8 @@ export function renderRun(v: RunView): string {
   }
   if (v.hasClass) out.push('', '※ class 포함 — 올린 뒤 톰캣 재기동 필요')
   if (v.pr?.notes) out.push('', `== PR #${v.pr.number} 반영 시 주의 ==`, v.pr.notes)
-  out.push('', `run: ${v.id}  (${v.statusLabel})`)
+  out.push('', `run: ${v.id}  (${v.statusLabel}${v.backupPruned ? ' · 백업 지움' : ''})`)
+  if (v.backupPruned) out.push(`백업 지움(${v.backupPruned}, 백업 정리) — 되돌리기·업로드를 하지 않음`)
   if (v.errors.length) {
     out.push('== 문제 (해결 전에는 반영하지 않음) ==', ...v.errors)
   } else if (v.code) out.push(`확인 코드: ${v.code}`)

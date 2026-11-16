@@ -12,6 +12,7 @@
 //   rollback <run> --plan <코드> --yes         백업을 되올리고 새로 만든 파일은 지움
 //   runs   [--target <대상>]                   지난 run 목록
 //   show   <run>                              run 내용(반영 목록·문제·확인 코드)
+//   prune  [--target <대상>] [--yes]           백업 정리: 90일 지난 run 의 백업 파일 목록(--yes 면 지움. 기록은 남김, ADR 0006)
 //   unlock <대상>                             끝난 작업이 남긴 잠금 풀기(살아 있는 작업의 잠금은 안 풂)
 //   creds  <대상> status|delete                FTP 접속 정보(자격 증명 관리자 prod-deploy:<대상>)
 //   creds  <대상> set                          stdin 첫 줄 사용자, 둘째 줄 비밀번호
@@ -23,6 +24,7 @@
 import { credentialUser, deleteCredential, writeCredential } from './engine/creds.ts'
 import { JobWriter, type JobStep } from './engine/jobs.ts'
 import { plan, preflight } from './engine/plan.ts'
+import { prunePlan, pruneBackups } from './engine/prune.ts'
 import { clearStaleLock, listRuns, openRun, STATUS_LABEL } from './engine/runs.ts'
 import { backup, rollback, upload, verify } from './engine/steps.ts'
 import { detectTarget, listTargets, loadTarget, loadTargetOrDeleted, type Target } from './engine/target.ts'
@@ -47,11 +49,13 @@ function parseArgs(argv: string[]): Args {
   return { positional, flags }
 }
 
+const kb = (bytes: number) => `${Math.ceil(bytes / 1024)}KB`
+
 const flag = (a: Args, k: string) => (typeof a.flags[k] === 'string' ? (a.flags[k] as string) : null)
 
 function usage(): never {
   process.stdout.write(
-    `사용법: node src/cli.ts <targets|check|plan|backup|upload|verify|rollback|runs|show|unlock|creds> ...\n` +
+    `사용법: node src/cli.ts <targets|check|plan|backup|upload|verify|rollback|runs|show|prune|unlock|creds> ...\n` +
       `자세한 인자는 src/cli.ts 맨 위 설명을 보세요.\n`
   )
   process.exit(2)
@@ -203,7 +207,7 @@ async function main(): Promise<number> {
       const t = await pickTarget(a)
       const runs = listRuns(t)
       if (json) say(JSON.stringify(runs.map(viewRun)))
-      else for (const r of runs) say(`${r.id}\t${STATUS_LABEL[r.status()]}\t${r.plan().length}개`)
+      else for (const r of runs) say(`${r.id}\t${STATUS_LABEL[r.status()]}\t${r.plan().length}개${r.backupPruned() ? '\t백업 지움' : ''}`)
       return 0
     }
 
@@ -211,6 +215,28 @@ async function main(): Promise<number> {
       const id = a.positional[0] ?? usage()
       const v = viewRun(openRun(id))
       say(json ? JSON.stringify(v) : renderRun(v))
+      return 0
+    }
+
+    case 'prune': {
+      const t = await pickTarget(a)
+      if (a.flags.yes !== true) {
+        const p = prunePlan(t)
+        if (json) say(JSON.stringify(p))
+        else {
+          say(`백업 정리 — ${t.label}: ${p.days}일 지난 run ${p.items.length}개, ${kb(p.bytes)}`)
+          for (const x of p.items) say(`${x.id}\t${STATUS_LABEL[x.status]}\t${kb(x.bytes)}\t${x.subject}`)
+          if (p.keptLatest.length) say(`남김(어느 운영 파일을 마지막으로 올린 run): ${p.keptLatest.join(', ')}`)
+          if (p.items.length) say('지우려면 --yes (run 기록은 남고, 지운 run 은 되돌릴 수 없음)')
+        }
+        return 0
+      }
+      const r = pruneBackups(t, null, by)
+      if (json) say(JSON.stringify(r))
+      else {
+        for (const x of r.pruned) say(`지움: ${x.id}\t${kb(x.bytes)}`)
+        say(`백업 정리 완료: ${r.pruned.length}개, ${kb(r.pruned.reduce((n, x) => n + x.bytes, 0))}`)
+      }
       return 0
     }
 

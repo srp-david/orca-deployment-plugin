@@ -204,7 +204,7 @@ test('초기화: 고른 PR·준비 확인·반영 목록을 비운다', async ()
 test('run 기록: 목록 비우기는 숨기기만 하고, 숨긴 run 은 스위치로 다시 본다', async () => {
   const hides: unknown[] = []
   const run = (id: string, hidden: boolean) => ({
-    id, status: 'planned', statusLabel: 'plan됨', verifyFailed: false, total: 1, uploaded: 0, createdAt: Date.now(), subject: id, hidden
+    id, status: 'planned', statusLabel: 'plan됨', verifyFailed: false, total: 1, uploaded: 0, createdAt: Date.now(), subject: id, hidden, backupPruned: false
   })
   const v = await mount(panel, {
     host: mockHost({
@@ -227,6 +227,48 @@ test('run 기록: 목록 비우기는 숨기기만 하고, 숨긴 run 은 스위
   await v.press({ text: '목록 비우기' })
   assert.deepEqual(hides, [{ target: 'myapp', hidden: true }])
   assert.ok(v.find({ text: /1개 숨김/ }))
+  await v.unmount()
+})
+
+test('run 기록: 백업 정리는 목록을 보여 준 뒤 확인해야 지우고, 본 run 만 보낸다', async () => {
+  const pruned: unknown[] = []
+  const item = (id: string) => ({ id, status: 'verified', statusLabel: '대조됨', subject: `PR ${id.slice(-1)}`, at: 0, bytes: 2048 })
+  const plan = { days: 90, items: [item('myapp-20260801-100000-aaaaaaa1'), item('myapp-20260802-100000-aaaaaaa2')], bytes: 4096, keptLatest: ['myapp-20260701-100000-aaaaaaa3'] }
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'prs.recent': [],
+        'runs.list': [
+          { id: 'myapp-20260801-100000-aaaaaaa1', status: 'verified', statusLabel: '대조됨', verifyFailed: false, total: 1, uploaded: 1, createdAt: Date.now(), subject: 'x', hidden: false, backupPruned: true }
+        ],
+        'backups.prunePlan': plan,
+        'backups.prune': (input: unknown) => {
+          pruned.push(input)
+          return { count: 2, bytes: 4096, skipped: [] }
+        }
+      }
+    })
+  })
+  await v.settled()
+  await v.select({ label: '운영 반영' }, 'runs')
+  assert.ok(v.find({ text: /백업 지움/ }), '지운 run 은 목록에 표시')
+  await v.press({ text: '90일 지난 백업 정리' })
+  assert.deepEqual(pruned, [], '누르기만 해서는 지우지 않는다')
+  assert.ok(v.find({ text: /백업 정리 — run 2개, 4KB/ }) || v.find({ label: /백업 정리 — run 2개, 4KB/ }))
+  assert.ok(v.find({ text: /\(1개\)은 남깁니다/ }))
+  await v.press({ text: 'run 2개 백업 지우기' })
+  assert.deepEqual(pruned, [{ target: 'myapp', ids: ['myapp-20260801-100000-aaaaaaa1', 'myapp-20260802-100000-aaaaaaa2'] }])
+  assert.ok(v.find({ text: /2개 run 의 백업을 지움\(4KB\)/ }))
+  await v.unmount()
+})
+
+test('백업을 지운 run 은 되돌리기·업로드 버튼이 없거나 꺼져 있다', async () => {
+  const { v } = await planned('backedUp', { backupPruned: '2026-11-16 12:00:00' })
+  assert.ok(v.find({ text: /백업 정리\(2026-11-16 12:00:00\)/ }))
+  assert.equal(v.find({ text: /My App에 2개 업로드$/ })!.disabled, true)
   await v.unmount()
 })
 
