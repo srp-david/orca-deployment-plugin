@@ -14,6 +14,8 @@ node src/cli.ts verify <run>                              # 대조만 다시
 node src/cli.ts rollback <run> --plan <확인 코드> --yes
 node src/cli.ts runs   --target myapp                     # 지난 run
 node src/cli.ts show   <run>                              # run 내용(반영 목록·문제·확인 코드)
+node src/cli.ts prune  --target myapp                     # 백업 정리: 90일 지난 run 의 백업 목록만
+node src/cli.ts prune  --target myapp --yes               # 그 백업을 지움(run 기록은 남김, 되살릴 수 없음)
 node src/cli.ts unlock myapp                              # 끝난 작업이 남긴 잠금 풀기
 node src/cli.ts creds  myapp status|set|delete            # 접속 정보
 ```
@@ -63,4 +65,4 @@ node skill/install.mjs   # ~/.claude/skills/prod-deploy/ 로 복사 (덮어쓰�
 }
 ```
 
-`permissions.ask` 는 명령 모양이 정확히 맞을 때만 걸리므로, 따옴표·`cd`·환경변수가 붙어도 잡히도록 훅을 함께 둡니다. 훅은 `cli.ts` 의 `upload`·`rollback`·`unlock`·`creds` 에서 확인 창을 띄웁니다(시험: `test/guard-hook.spec.ts`).
+`permissions.ask` 는 명령 모양이 정확히 맞을 때만 걸리므로, 따옴표·`cd`·환경변수가 붙어도 잡히도록 훅을 함께 둡니다. 훅은 `cli.ts` 의 `upload`·`rollback`·`unlock`·`creds` 와 `--yes` 를 붙인 `prune` 에서 확인 창을 띄웁니다(시험: `test/guard-hook.spec.ts`). `prune` 은 `--yes` 가 명령 끝 어디에든 올 수 있어 `permissions.ask` 로는 모양을 맞추기 어렵고, 훅이 잡습니다.

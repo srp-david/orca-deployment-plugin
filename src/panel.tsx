@@ -41,6 +41,7 @@ import type {
   Job,
   JobStep,
   PreflightView,
+  PrunePlan,
   RecentPr,
   RunSummary,
   RunView,
@@ -76,6 +77,9 @@ const prsError = atom<string | null>(null)
 /** run 기록 탭: 숨긴 run 도 보기, 숨기기 결과 안내. */
 const showHidden = atom(false)
 const runsNotice = atom<string | null>(null)
+/** 백업 정리: 지금 지울 수 있는 run 목록(run 기록을 불러올 때 같이 받음, 못 받으면 null)과, 사람이 확인하려고 펼친 목록. */
+const prunable = atom<PrunePlan | null>(null)
+const pruneOffer = atom<PrunePlan | null>(null)
 
 // 대상 설정 편집
 /**
@@ -200,6 +204,46 @@ async function loadRuns(): Promise<void> {
   if (!id) return set(runs, [])
   const list = await ask(() => plugin.request('runs.list', { target: id }))
   if (list && read(targetId) === id) set(runs, list)
+  // 버튼을 흐리게 할지 정하는 데만 쓴다. 못 받아도(예전 워커) run 기록은 그대로 보인다.
+  try {
+    const p = await plugin.request('backups.prunePlan', { target: id })
+    if (read(targetId) === id) set(prunable, p)
+  } catch {
+    if (read(targetId) === id) set(prunable, null)
+  }
+}
+
+const size = (bytes: number): string =>
+  bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.ceil(bytes / 1024)}KB`
+
+/** 백업 정리 1단계: 지울 목록을 새로 받아 펼친다(아직 지우지 않음). */
+async function offerPrune(): Promise<void> {
+  act()
+  const target = read(targetId)
+  if (!target) return
+  const p = await ask(() => plugin.request('backups.prunePlan', { target }))
+  if (!p || read(targetId) !== target) return
+  set(prunable, p)
+  if (!p.items.length) {
+    set(pruneOffer, null)
+    set(runsNotice, `${p.days}일 지난 백업 중 지울 것이 없음${p.keptLatest.length ? ` · 운영 파일을 마지막으로 올린 run ${p.keptLatest.length}개는 남김` : ''}`)
+    return
+  }
+  set(runsNotice, null)
+  set(pruneOffer, p)
+}
+
+/** 백업 정리 2단계: 사람이 본 목록의 run 만 보낸다. 워커가 잠금 안에서 다시 판단해, 그 사이 지울 수 없게 된 run 은 남긴다. */
+async function confirmPrune(): Promise<void> {
+  act()
+  const target = read(targetId)
+  const offer = read(pruneOffer)
+  if (!target || !offer) return
+  set(pruneOffer, null)
+  const r = await ask(() => plugin.request('backups.prune', { target, ids: offer.items.map((x) => x.id) }))
+  if (r)
+    set(runsNotice, `${r.count}개 run 의 백업을 지움(${size(r.bytes)}) — run 기록은 그대로 있음${r.skipped.length ? ` · ${r.skipped.length}개는 그 사이 상태가 바뀌어 남김` : ''}`)
+  await loadRuns()
 }
 
 /** run 기록 화면에서 숨기기(보이는 run 모두) / 다시 보이기(모두). 파일과 안전 검사에는 그대로 남는다. */
@@ -233,6 +277,8 @@ function chooseTarget(id: string, force = false): void {
   set(spec, '')
   set(runsNotice, null)
   set(showHidden, false)
+  set(prunable, null)
+  set(pruneOffer, null)
   void loadRuns()
   void loadPrs()
 }
@@ -965,12 +1011,13 @@ function RunCard() {
   const v = d.view
   const busy = !!job || !!v.busy
   const last = lastJob(t.id, v.id)
-  const canBackup = !v.configChanged && (v.status === 'planned' || v.status === 'backedUp')
-  const canUpload = !v.configChanged && v.status === 'backedUp'
-  // 워커가 예전 판이면 경고 칸이 없다.
+  // 워커가 예전 판이면 경고·백업 지움 칸이 없다.
   const warnings = v.warnings ?? []
+  const pruned = v.backupPruned ?? null
+  const canBackup = !v.configChanged && !pruned && (v.status === 'planned' || v.status === 'backedUp')
+  const canUpload = !v.configChanged && !pruned && v.status === 'backedUp'
   const canVerify = v.status === 'uploaded' || v.status === 'verified'
-  const canRollback = v.status === 'partial' || v.status === 'uploaded' || v.status === 'verified'
+  const canRollback = !pruned && (v.status === 'partial' || v.status === 'uploaded' || v.status === 'verified')
   const tone = v.status === 'blocked' ? 'danger' : v.status === 'verified' ? 'success' : v.status === 'partial' ? 'warning' : 'accent'
   return (
     <Card title="반영 목록" description={v.subject || undefined}>
@@ -979,6 +1026,7 @@ function RunCard() {
           <Row gap="xs" wrap>
             <Badge tone={tone}>{v.statusLabel}{v.status === 'partial' ? ` ${v.uploaded}/${v.total}` : ''}</Badge>
             {v.verifyFailed && <Badge tone="danger">대조 실패</Badge>}
+            {pruned && <Badge tone="neutral">백업 지움</Badge>}
           </Row>
           {v.code && <Badge tone="neutral">확인 코드 {v.code}</Badge>}
         </Box>
@@ -991,6 +1039,11 @@ function RunCard() {
             { label: 'run', value: v.id, code: true }
           ]}
         />
+        {pruned && (
+          <Callout tone="neutral" title="백업 지움" icon="info">
+            {`백업 정리(${pruned})로 이 run 의 백업 파일을 지웠습니다. 기록은 그대로지만 되돌리기·업로드는 하지 않습니다. 다시 올리려면 새로 plan 하세요.`}
+          </Callout>
+        )}
         {v.configChanged && (
           <Callout tone="warning" title="대상 설정이 이 run 을 만든 뒤 바뀜" icon="warning">
             백업·업로드는 하지 않습니다. 새로 plan 하세요. 되돌리기는 위에 적힌 이 run 의 위치로 합니다.
@@ -1188,6 +1241,8 @@ function RunsTab() {
   const hiddenCount = all.filter((r) => r.hidden).length
   const showing = read(showHidden)
   const list = showing ? all : all.filter((r) => !r.hidden)
+  const canPrune = read(prunable)
+  const offer = read(pruneOffer)
   return (
     <Stack gap="sm">
       <Row justify="between">
@@ -1195,6 +1250,15 @@ function RunsTab() {
         <Row gap="xs">
           <Button icon="close" variant="ghost" size="sm" disabled={!all.some((r) => !r.hidden)} onPress={() => hideRuns(true)}>
             목록 비우기
+          </Button>
+          <Button
+            icon="delete"
+            variant="ghost"
+            size="sm"
+            disabled={canPrune ? canPrune.items.length === 0 : false}
+            onPress={offerPrune}
+          >
+            {`${canPrune?.days ?? 90}일 지난 백업 정리`}
           </Button>
           <Button icon="refresh" variant="ghost" size="sm" onPress={loadRuns}>
             새로 고침
@@ -1210,6 +1274,33 @@ function RunsTab() {
             </Button>
           )}
         </Row>
+      )}
+      {offer && (
+        <Callout tone="warning" title={`백업 정리 — run ${offer.items.length}개, ${size(offer.bytes)}`} icon="warning">
+          <Stack gap="xs">
+            <Text size="xs">
+              {`${offer.days}일 지난 run 의 백업 파일을 지웁니다. run 기록과 "반영됨" 표시는 남지만, 지운 run 은 되돌릴 수 없고 되살릴 수도 없습니다. 부분 업로드 run 과 어느 운영 파일을 마지막으로 올린 run${offer.keptLatest.length ? `(${offer.keptLatest.length}개)` : ''}은 남깁니다.`}
+            </Text>
+            {offer.items.slice(0, 10).map((x) => (
+              <Text key={x.id} size="xs" muted>
+                {`· ${x.subject || x.id} — ${x.statusLabel} · ${size(x.bytes)}`}
+              </Text>
+            ))}
+            {offer.items.length > 10 && (
+              <Text size="xs" muted>
+                {`… 외 ${offer.items.length - 10}개`}
+              </Text>
+            )}
+            <Row gap="xs">
+              <Button icon="delete" tone="danger" size="sm" onPress={confirmPrune}>
+                {`run ${offer.items.length}개 백업 지우기`}
+              </Button>
+              <Button variant="ghost" size="sm" onPress={() => set(pruneOffer, null)}>
+                취소
+              </Button>
+            </Row>
+          </Stack>
+        </Callout>
       )}
       {read(runsNotice) && (
         <Text size="xs" muted>
@@ -1237,7 +1328,7 @@ function RunsTab() {
           key: r.id,
           cells: {
             at: { type: 'relative', at: r.createdAt, format: 'short' },
-            status: r.statusLabel + (r.status === 'partial' ? ` ${r.uploaded}/${r.total}` : '') + (r.verifyFailed ? ' · 대조 실패' : '') + (r.hidden ? ' · 숨김' : ''),
+            status: r.statusLabel + (r.status === 'partial' ? ` ${r.uploaded}/${r.total}` : '') + (r.verifyFailed ? ' · 대조 실패' : '') + (r.backupPruned ? ' · 백업 지움' : '') + (r.hidden ? ' · 숨김' : ''),
             files: r.total,
             subject: r.subject || r.id
           }

@@ -2,7 +2,7 @@
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
 // pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
 // backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김),
-// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다).
+// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다), backup.pruned(백업 정리로 backup/ 을 지움, ADR 0006).
 import {
   appendFileSync,
   existsSync,
@@ -158,6 +158,11 @@ export class Run {
     return /^\d{2}:\d{2}:\d{2} 업로드 시작/m.test(this.text('deploy.log')) ? 'unknown' : null
   }
 
+  /** 백업 정리로 백업 파일을 지웠으면 그 시각(글자). 지운 run 은 되돌리기·업로드·다시 백업을 하지 않는다(ADR 0006). */
+  backupPruned(): string | null {
+    return this.has('backup.pruned') ? this.text('backup.pruned').split('\n')[0].trim() || '?' : null
+  }
+
   /** 업로드를 시작한 적이 있는가(끝났든 아니든). */
   uploadBegun(): boolean {
     return this.uploadAt() !== null
@@ -215,6 +220,15 @@ function indexed(targetId: string): Map<string, string> {
     if (i > 0) m.set(l.slice(0, i), l.slice(i + 1))
   }
   return m
+}
+
+/** run 색인에 이름이 있는 대상들(지운 대상 포함). */
+export function indexedTargetIds(): string[] {
+  const dir = join(home(), 'run-index')
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter((f) => f.endsWith('.tsv'))
+    .map((f) => f.slice(0, -4))
 }
 
 /** 이 대상의 run 이 있을 수 있는 폴더들: 지금 설정, 색인, 지운 설정들. */

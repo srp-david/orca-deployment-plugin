@@ -615,6 +615,27 @@ async function scenarios(tip1: string): Promise<void> {
     assert.match(r.out, /되돌림/)
     assert.match(r.out, /막힘/)
   })
+
+  await step('백업 정리: --yes 없으면 목록만, 있으면 90일 지난 백업만 지우고 기록은 남김', () => {
+    const fresh = cli('prune', '--target', 'fx')
+    assert.equal(fresh.code, 0, fresh.out)
+    assert.match(fresh.out, /90일 지난 run 0개/)
+    // 되돌린 run 하나를 100일 전에 올린 것으로 바꾼다.
+    const id = /^(\S+)\t되돌림/m.exec(cli('runs', '--target', 'fx').out)?.[1] ?? ''
+    assert.ok(id, '되돌린 run 이 있어야 함')
+    const dir = `${tmp}/runs/${id}`
+    const started = `${dir}/upload.started`
+    writeFileSync(started, `x\n${Date.now() - 100 * 24 * 60 * 60 * 1000}\n`)
+    const list = cli('prune', '--target', 'fx')
+    assert.match(list.out, new RegExp(`${id}\t되돌림`))
+    assert.ok(existsSync(`${dir}/backup`), '목록만 보고는 지우지 않음')
+    const done = cli('prune', '--target', 'fx', '--yes')
+    assert.equal(done.code, 0, done.out)
+    assert.match(done.out, new RegExp(`지움: ${id}`))
+    assert.equal(existsSync(`${dir}/backup`), false)
+    assert.ok(existsSync(`${dir}/plan.tsv`), 'run 기록은 남음')
+    assert.match(cli('show', id).out, /백업 지움/)
+  })
 }
 
 main().then(

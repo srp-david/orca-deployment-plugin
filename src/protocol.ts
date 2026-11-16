@@ -1,11 +1,12 @@
 // 패널 ↔ 워커 약속. src/panel.tsx 와 src/worker.ts 가 같이 읽는다.
 import type { Job, JobStep } from './engine/jobs.ts'
 import type { CheckItem, PrInfo } from './engine/plan.ts'
+import type { PrunePlan } from './engine/prune.ts'
 import type { Target } from './engine/target.ts'
 import type { RunView } from './engine/view.ts'
 import type { ConnVerdict } from './conn-verdict.ts'
 
-export type { CheckItem, ConnVerdict, Job, JobStep, PrInfo, RunView, Target }
+export type { CheckItem, ConnVerdict, Job, JobStep, PrInfo, PrunePlan, RunView, Target }
 
 export type TargetSummary = {
   id: string
@@ -47,6 +48,8 @@ export type RunSummary = {
   subject: string
   /** run 기록 화면에서 숨김(파일·안전 검사에는 그대로 있음). */
   hidden: boolean
+  /** 백업 정리로 백업 파일을 지움. */
+  backupPruned: boolean
 }
 
 /** 최근 병합된 PR 과, 이 대상에서 그 PR 로 만든 run 중 가장 앞선 상태. */
@@ -111,6 +114,10 @@ declare module 'orca' {
     'runs.list': { input: { target: string }; output: RunSummary[] }
     /** run 기록 화면에서 숨기기(hidden: true 면 보이는 run 모두, 부분 업로드는 빼고) / 다시 보이기(모두). */
     'runs.hide': { input: { target: string; hidden: boolean }; output: { count: number; kept: number } }
+    /** 백업 정리로 지울 수 있는 run 과 크기(읽기만). runs 에는 빼고 남기는 run 도 알려 준다. */
+    'backups.prunePlan': { input: { target: string }; output: PrunePlan }
+    /** 백업 정리: ids 중 지금도 지울 수 있는 run 의 백업만 지운다(사람이 본 목록보다 더 지우지 않음). */
+    'backups.prune': { input: { target: string; ids: string[] }; output: { count: number; bytes: number; skipped: string[] } }
     'run.get': { input: { id: string }; output: { view: RunView; log: string[] } }
     /** 끝난 작업이 남긴 잠금을 푼다. 살아 있는 작업의 잠금이면 거절. */
     'lock.clear': { input: { target: string }; output: { message: string } }
