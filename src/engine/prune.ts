@@ -120,6 +120,8 @@ function latestUploads(runs: Run[]): Map<string, number> {
     if (s !== 'uploaded' && s !== 'verified') continue
     // plan.tsv 를 믿을 수 없으면 무엇을 올렸는지 모른다: 나중 업로드로 세지 않는다(앞 run 이 남는 쪽).
     if (r.planProblem()) continue
+    // 저장 위치를 믿을 수 없는 run(링크·정션 너머)의 기록도 근거로 쓰지 않는다: 다른 백업의 보존 여부를 바꾸지 않게.
+    if (runDirProblem(r)) continue
     const at = r.uploadAt()
     if (typeof at !== 'number') continue
     for (const row of r.plan()) {
@@ -168,6 +170,12 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
       if (unfinished) keepUnfinished(at === null ? '업로드 시각을 몰라 남김' : `${BACKUP_DAYS}일이 지나지 않아 남김`)
       continue
     }
+    // 저장 위치부터 본다: 링크·정션 너머의 run 은 그 기록도 믿지 않고, 지우지 않는다.
+    const unsafe = deleteProblem(run)
+    if (unsafe) {
+      keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
+      continue
+    }
     const up = run.uploadAt()
     const broken = up !== null ? run.planProblem() : null
     if (broken) {
@@ -184,11 +192,6 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
         else keptLatest.push(run.id)
         continue
       }
-    }
-    const unsafe = deleteProblem(run)
-    if (unsafe) {
-      keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
-      continue
     }
     items.push(itemOf(run, status, at, unfinished))
   }
