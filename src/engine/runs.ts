@@ -184,9 +184,10 @@ export class Run {
     return this.has('backup.pruned') ? this.text('backup.pruned').split('\n')[0].trim() || '?' : null
   }
 
-  /** 백업 정리가 지우는 중에 멈췄는가(backup.pruning 이 남음). 백업 지움과 같이 막고, 다음 백업 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 남은 백업을 마저 지운다. */
+  /** 백업 정리가 지우는 중에 멈췄는가(backup.pruning 이 남고 backup.pruned 는 없음). 백업 지움과 같이 막고, 다음 백업 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 남은 백업을 마저 지운다. */
   pruneUnfinished(): boolean {
-    return this.has('backup.pruning')
+    // backup.pruned 는 다 지운 뒤에만 쓴다: 있으면 지우기는 끝났고 남은 backup.pruning 은 치우지 못한 표시일 뿐이다.
+    return this.has('backup.pruning') && !this.has('backup.pruned')
   }
 
   /** 업로드를 시작한 적이 있는가(끝났든 아니든). */

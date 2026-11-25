@@ -248,7 +248,11 @@ export function pruneBackups(
         if (!run.pruneUnfinished()) run.write('backup.pruning', `${dateTime()}\n${item.bytes}\n`)
         for (const d of DIRS) remove(run.path(d))
         run.write('backup.pruned', `${dateTime()}\n${item.bytes}\n`)
-        run.remove('backup.pruning')
+        try {
+          run.remove('backup.pruning')
+        } catch {
+          // 지움 표시를 이미 썼으니 지우기는 끝났다: 남은 지우는 중 표시는 무시한다(Run.pruneUnfinished 가 지움 표시를 먼저 본다)
+        }
         run.log(`백업 정리: ${BACKUP_DAYS}일 지남 — ${item.retry ? '지우다 멈춘 ' : ''}백업 파일을 지움(${item.bytes} 바이트, ${by}). 이 run 은 되돌릴 수 없음`)
         pruned.push(item)
       } catch (e) {

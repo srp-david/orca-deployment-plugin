@@ -63,7 +63,7 @@ node test/seed-test-ftp.ts <커밋>     # 시험 FTP 루트를 그 커밋의 직
 | run 위치 색인 | `~/.prod-deploy/run-index/` (run 기록 폴더를 바꿔도 예전 run 을 찾음) |
 | 잠금·작업 진행 | `~/.prod-deploy/locks/`, `~/.prod-deploy/jobs/` |
 
-run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `warnings.txt`(경고), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본, 업로드가 끝나면 지움), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김), `backup.pruned`(백업 정리로 `backup/` 을 지운 시각·크기, [ADR 0006](adr/0006-prune-old-backups-keep-records.md)), `backup.pruning`(백업 정리가 지우는 중. 남아 있으면 지우다 멈춘 것. 다음 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 마저 지우고, 마지막 run 이 되었으면 남김).
+run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `warnings.txt`(경고), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본, 업로드가 끝나면 지움), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김), `backup.pruned`(백업 정리로 `backup/` 을 지운 시각·크기, [ADR 0006](adr/0006-prune-old-backups-keep-records.md)), `backup.pruning`(백업 정리가 지우는 중. `backup.pruned` 없이 남아 있으면 지우다 멈춘 것(`backup.pruned` 가 있으면 다 지운 것으로 봄). 다음 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 마저 지우고, 마지막 run 이 되었으면 남김).
 
 확인 코드 = `sha256(대상 이름 + "\n" + plan.tsv)` 의 앞 8자리. run 폴더 형식과 확인 코드는 예전 bash 도구와 같아서, 그때 만든 run 도 읽고 되돌릴 수 있습니다(ADR 0001).
 
