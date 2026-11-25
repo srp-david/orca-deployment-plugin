@@ -256,7 +256,7 @@ async function confirmPrune(): Promise<void> {
       runsNotice,
       `${r.count}개 run 의 백업을 지움(${size(r.bytes)}) — run 기록은 그대로 있음${r.skipped.length ? ` · ${r.skipped.length}개는 그 사이 상태가 바뀌어 남김` : ''}` +
         (failed.length
-          ? ` · ${failed.length}개는 지우다 실패(일부 남음, 다음 정리에서 다시 지움): ${failed.map((x) => `${x.id} — ${x.error}`).join(' / ')}`
+          ? ` · ${failed.length}개는 지우다 실패(일부 남음, 다음 정리에서 다시 판단해 지울 수 있으면 마저 지움): ${failed.map((x) => `${x.id} — ${x.error}`).join(' / ')}`
           : '')
     )
   }

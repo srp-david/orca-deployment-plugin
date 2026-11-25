@@ -119,7 +119,7 @@ declare module 'orca' {
     /** 백업 정리: ids 중 지금도 지울 수 있는 run 의 백업만 지운다(사람이 본 목록보다 더 지우지 않음). */
     'backups.prune': {
       input: { target: string; ids: string[] }
-      /** failed: 지우다 실패한 run 과 오류(일부 남음, 다음 정리에서 다시 지움). */
+      /** failed: 지우다 실패한 run 과 오류(일부 남음, 다음 정리에서 다시 판단해 지울 수 있으면 마저 지움). */
       output: { count: number; bytes: number; skipped: string[]; failed: { id: string; error: string }[] }
     }
     'run.get': { input: { id: string }; output: { view: RunView; log: string[] } }

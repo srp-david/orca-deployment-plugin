@@ -422,7 +422,7 @@ test('한 run 의 백업 삭제가 실패해도 나머지는 지우고, 실패�
   await assert.rejects(rollback(run.id, run.code(), true), /백업 지움/)
   await assert.rejects(upload(run.id, run.code(), true), /백업 지움/)
   await assert.rejects(backup(run.id), /백업 지움/)
-  // 다음 정리: 남은 백업을 다시 지운다
+  // 다음 정리: 다시 판단해 지울 수 있으므로 남은 백업을 마저 지운다
   assert.deepEqual(ids(), [stuck.id])
   const again = pruneAll()
   assert.deepEqual(again.pruned.map((x) => x.id), [stuck.id])

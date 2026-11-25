@@ -243,7 +243,7 @@ async function main(): Promise<number> {
       if (json) say(JSON.stringify(r))
       else {
         for (const x of r.pruned) say(`지움: ${x.id}\t${kb(x.bytes)}`)
-        for (const x of r.failed) say(`실패(일부 남음, 다음 정리에서 다시 지움): ${x.id} — ${x.error}`)
+        for (const x of r.failed) say(`실패(일부 남음, 다음 정리에서 다시 판단해 지울 수 있으면 마저 지움): ${x.id} — ${x.error}`)
         say(`백업 정리 ${r.failed.length ? '중 실패 있음' : '완료'}: ${r.pruned.length}개, ${kb(r.pruned.reduce((n, x) => n + x.bytes, 0))}${r.failed.length ? ` · 실패 ${r.failed.length}개` : ''}`)
       }
       return r.failed.length ? 1 : 0

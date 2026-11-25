@@ -244,7 +244,7 @@ export function pruneBackups(
           continue
         }
         // "지우는 중" 표시를 먼저 남긴다: 지우다 끊겨도 반쯤 남은 백업으로 되돌리거나 올리지 않게(백업 지움처럼 막는다).
-        // 다 지운 뒤에 "지움" 표시로 바꾼다. 지우는 중으로 남은 run 은 다음 정리가 마저 지운다.
+        // 다 지운 뒤에 "지움" 표시로 바꾼다. 지우는 중으로 남은 run 은 다음 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 마저 지운다.
         if (!run.pruneUnfinished()) run.write('backup.pruning', `${dateTime()}\n${item.bytes}\n`)
         for (const d of DIRS) remove(run.path(d))
         run.write('backup.pruned', `${dateTime()}\n${item.bytes}\n`)
@@ -255,7 +255,7 @@ export function pruneBackups(
         const error = (e as Error).message
         failed.push({ id: item.id, error })
         try {
-          run?.log(`백업 정리 중 실패(일부 남음): ${error} — 이 run 은 되돌릴 수 없음. 다음 백업 정리에서 남은 백업을 다시 지움`)
+          run?.log(`백업 정리 중 실패(일부 남음): ${error} — 이 run 은 되돌릴 수 없음. 다음 백업 정리에서 다시 판단해 지울 수 있으면 남은 백업을 마저 지움`)
         } catch {
           // 로그도 못 쓰면 결과의 failed 로만 알린다
         }
