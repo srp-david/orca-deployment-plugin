@@ -45,6 +45,8 @@ type Fake = {
   done?: boolean
   verified?: boolean
   rolledBack?: boolean
+  /** 부분 업로드에서 올린 줄 수(로그에 [n/총] 줄을 남김). 다음 줄에서 업로드 실패로 멈춘 것으로 친다. */
+  uploadedRows?: number
 }
 
 let seq = 0
@@ -136,11 +138,26 @@ test('부분 업로드 run 과 업로드 시각을 모르는 run 은 넣지 않�
   assert.deepEqual(ids(), [])
 })
 
-test('부분 업로드 run 이 나중에 같은 파일을 올렸으면 앞 run 은 마지막이 아니다', () => {
+test('첫 파일에서 실패한(0/1) 부분 업로드 run 은 앞 run 의 보호를 풀지 않는다', () => {
   reset()
   const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
-  fakeRun(['a.jsp'], { upload: ago(150), done: false })
-  assert.deepEqual(ids(), [a.id])
+  const b = fakeRun(['a.jsp'], { upload: ago(150), done: false, uploadedRows: 0 })
+  assert.equal(b.status(), 'partial')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [], '운영의 a.jsp 는 아직 a 가 올린 것')
+  assert.deepEqual(p.keptLatest, [a.id])
+  pruneBackups(fx, null, 'test', NOW)
+  assert.ok(openRun(a.id).has('backup'), '부분 업로드 run 과 그 직전 성공 백업은 함께 남는다')
+  assert.ok(openRun(b.id).has('backup'))
+})
+
+test('일부만 올린(1/2) 부분 업로드 run 도 앞 run 의 보호를 풀지 않는다', () => {
+  reset()
+  const a = fakeRun(['b.jsp'], { upload: ago(200), verified: true })
+  const a2 = fakeRun(['a.jsp'], { upload: ago(190), verified: true })
+  fakeRun(['a.jsp', 'b.jsp'], { upload: ago(150), done: false, uploadedRows: 1 })
+  assert.deepEqual(ids(), [])
+  assert.deepEqual(prunePlan(fx, NOW).keptLatest.sort(), [a.id, a2.id].sort())
 })
 
 test('올리지 않은 run 은 백업을 받은 시각으로 잰다', () => {
