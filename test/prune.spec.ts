@@ -529,3 +529,40 @@ test('다 지운 뒤 backup.pruning 을 치우지 못해도 실패로 보고하�
   assert.equal(openRun(run.id).pruneUnfinished(), false)
   assert.doesNotMatch(run.text('deploy.log'), /백업 정리 중 실패/)
 })
+
+test('지우기 바로 전에 다시 본다: 판단한 뒤 backup 이 정션으로 바뀐 run 은 지우지 않고 건너뛴다', (t) => {
+  reset()
+  const first = fakeRun(['a.jsp'], { upload: ago(300), rolledBack: true })
+  const second = fakeRun(['b.jsp'], { upload: ago(200), rolledBack: true })
+  const out = outsideDir('swap')
+  writeFileSync(`${out}/keep.jsp`, 'k')
+  let swapped: boolean | null = null
+  const r = pruneBackups(fx, { code: prunePlan(fx, NOW).code }, 'test', NOW, (p) => {
+    if (swapped === null) {
+      // 첫 run 을 지우는 사이 다음 run 의 backup 이 바깥을 가리키는 정션으로 바뀐다
+      rmSync(second.path('backup'), { recursive: true })
+      swapped = junction(out, second.path('backup'))
+    }
+    rmSync(p, { recursive: true, force: true })
+  })
+  if (!swapped) return t.skip('정션을 만들 수 없는 환경')
+  assert.deepEqual(r.pruned.map((x) => x.id), [first.id])
+  assert.deepEqual(r.skipped, [second.id])
+  assert.deepEqual(r.failed, [])
+  assert.ok(existsSync(`${out}/keep.jsp`), '바깥 파일은 남음')
+  assert.equal(second.has('backup.pruning') || second.has('backup.pruned'), false, '건너뛴 run 에는 표시를 남기지 않음')
+})
+
+test('CLI: --json 으로 지우면 삭제에 실패한 run 이 결과의 failed 에 오류와 함께 나온다', () => {
+  reset()
+  const stuck = fakeRun(['a.jsp'], { upload: agoNow(300), rolledBack: true })
+  const next = fakeRun(['b.jsp'], { upload: agoNow(200), rolledBack: true })
+  const code = JSON.parse(cli('prune', '--target', 'fx', '--json').out).code as string
+  const r = cliWith(['--import', FAIL_RM], { PD_FAIL_RUN: stuck.id }, 'prune', '--target', 'fx', '--plan', code, '--yes', '--json')
+  assert.equal(r.code, 1, r.out)
+  const out = JSON.parse(r.out)
+  assert.deepEqual(out.pruned.map((x: { id: string }) => x.id), [next.id])
+  assert.equal(out.failed.length, 1)
+  assert.equal(out.failed[0].id, stuck.id)
+  assert.match(out.failed[0].error, /EBUSY.*backup/)
+})
