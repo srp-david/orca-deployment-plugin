@@ -362,3 +362,39 @@ test('백업 안의 정션은 따라가지 않는다: 바깥 파일은 크기에
   assert.equal(existsSync(run.path('backup')), false)
   assert.ok(existsSync(`${out}/big.bin`), '바깥 파일은 남음')
 })
+
+test('한 run 의 백업 삭제가 실패해도 나머지는 지우고, 실패를 돌려주고 로그에 남기며, 다음 정리에서 남은 백업을 지운다', async () => {
+  reset()
+  const stuck = fakeRun(['a.jsp', 'b.jsp'], { backupAt: ago(300) }) // 먼저 지우는 run
+  const next = fakeRun(['c.jsp'], { backupAt: ago(200) })
+  const busy = (p: string) => {
+    if (p === stuck.path('backup')) {
+      // 파일 하나를 지운 뒤 잠긴 파일에서 멈춘다(탐색기·백신이 잡고 있을 때처럼)
+      rmSync(join(p, 'files', 'a.jsp'))
+      throw Object.assign(new Error(`EBUSY: resource busy or locked, unlink '${join(p, 'files', 'b.jsp')}'`), { code: 'EBUSY' })
+    }
+    rmSync(p, { recursive: true, force: true })
+  }
+  const r = pruneBackups(fx, { code: prunePlan(fx, NOW).code }, 'test', NOW, busy)
+  assert.deepEqual(r.pruned.map((x) => x.id), [next.id], '다음 run 은 지움')
+  assert.equal(existsSync(next.path('backup')), false)
+  assert.deepEqual(r.failed.map((x) => x.id), [stuck.id])
+  assert.match(r.failed[0].error, /b\.jsp/, '오류에 경로가 있음')
+  const run = openRun(stuck.id)
+  assert.match(run.text('deploy.log'), /백업 정리 중 실패\(일부 남음\).*b\.jsp/)
+  assert.ok(existsSync(run.path('backup/files/b.jsp')), '일부 남음')
+  // 지우는 중인 run 은 지운 run 처럼 되돌리기·업로드·다시 백업을 막는다
+  assert.ok(run.backupPruned())
+  await assert.rejects(rollback(run.id, run.code(), true), /백업 지움/)
+  await assert.rejects(upload(run.id, run.code(), true), /백업 지움/)
+  await assert.rejects(backup(run.id), /백업 지움/)
+  // 다음 정리: 남은 백업을 다시 지운다
+  assert.deepEqual(ids(), [stuck.id])
+  const again = pruneAll()
+  assert.deepEqual(again.pruned.map((x) => x.id), [stuck.id])
+  assert.deepEqual(again.failed, [])
+  assert.equal(existsSync(run.path('backup')), false)
+  assert.match(openRun(stuck.id).text('deploy.log'), /백업 정리: 90일 지남/)
+  assert.ok(openRun(stuck.id).backupPruned())
+  assert.deepEqual(ids(), [], '다 지운 뒤에는 다시 나오지 않음')
+})

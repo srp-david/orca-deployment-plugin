@@ -295,6 +295,31 @@ test('run 기록: 백업 정리 후보가 11개 이상이어도 확인 전에 �
   await v.unmount()
 })
 
+test('run 기록: 백업 정리 중 지우다 실패한 run 이 있으면 그 수와 오류를 알린다', async () => {
+  const item = (id: string) => ({ id, status: 'verified', statusLabel: '대조됨', subject: `PR ${id.slice(-1)}`, at: 0, bytes: 2048 })
+  const plan = { days: 90, items: [item('myapp-20260801-100000-aaaaaaa1'), item('myapp-20260802-100000-aaaaaaa2')], bytes: 4096, keptLatest: [], keptOther: [], code: 'abcd1234' }
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'prs.recent': [],
+        'runs.list': [],
+        'backups.prunePlan': plan,
+        'backups.prune': () => ({ count: 1, bytes: 2048, skipped: [], failed: [{ id: 'myapp-20260801-100000-aaaaaaa1', error: "EBUSY: resource busy or locked, unlink 'C:/x/backup/files/a.jsp'" }] })
+      }
+    })
+  })
+  await v.settled()
+  await v.select({ label: '운영 반영' }, 'runs')
+  await v.press({ text: '90일 지난 백업 정리' })
+  await v.press({ text: 'run 2개 백업 지우기' })
+  assert.ok(v.find({ text: /1개 run 의 백업을 지움/ }))
+  assert.ok(v.find({ text: /1개는 지우다 실패.*myapp-20260801-100000-aaaaaaa1.*EBUSY/ }))
+  await v.unmount()
+})
+
 test('run 기록: 백업 정리에서 다른 이유로 남기는 run 은 그 이유를 보여 준다', async () => {
   const plan = { days: 90, items: [], bytes: 0, keptLatest: [], keptOther: [{ id: 'myapp-20260701-100000-aaaaaaa3', reason: '업로드한 run 인데 plan.tsv 없음 — 올린 파일을 알 수 없어 남김' }] }
   const v = await mount(panel, {
