@@ -1,10 +1,12 @@
 // 백업 정리(ADR 0006): 90일 지난 run 의 backup/ 만 지우고 기록은 남긴다. FTP 없이 run 폴더를 손으로 만들어 본다.
 // 사용법: node --test test/prune.spec.ts
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 const tmp = mkdtempSync(join(tmpdir(), 'pd-prune-')).replace(/\\/g, '/')
 process.env.PRODDEPLOY_HOME = `${tmp}/home`
@@ -80,6 +82,13 @@ function reset() {
 }
 
 const ids = (t = fx) => prunePlan(t, NOW).items.map((x) => x.id)
+
+const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
+/** CLI 를 자식 프로세스로 부른다(같은 임시 PRODDEPLOY_HOME). 시각은 진짜 지금이라 run 나이는 며칠 어긋나도 되게 잡는다. */
+function cli(...args: string[]): { code: number; out: string } {
+  const r = spawnSync(process.execPath, [CLI, ...args], { env: { ...process.env, PRODDEPLOY_HOME: `${tmp}/home` }, encoding: 'utf8' })
+  return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') }
+}
 
 test('90일 지난 run 은 지우고, 90일 안 된 run 은 남긴다', () => {
   reset()
@@ -212,4 +221,46 @@ test('백업을 지운 run 은 되돌리기·업로드·다시 백업을 하지 
   await assert.rejects(rollback(done.id, done.code(), true), /백업 지움.*되돌릴 수 없음/)
   await assert.rejects(upload(ready.id, ready.code(), true), /백업 지움.*올리지 않음/)
   await assert.rejects(backup(ready.id), /백업 지움.*다시 백업하지 않음/)
+})
+
+test('업로드한 run 의 plan.tsv 가 없거나, 비었거나, 줄이 깨졌으면 백업을 지우지 않고 이유를 보인다', () => {
+  reset()
+  const missing = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  rmSync(missing.path('plan.tsv'))
+  const empty = fakeRun(['b.jsp'], { upload: ago(200), verified: true })
+  writeFileSync(empty.path('plan.tsv'), '')
+  const broken = fakeRun(['c.jsp'], { upload: ago(200), verified: true })
+  writeFileSync(broken.path('plan.tsv'), 'M\t/c/repo/src/main/webapp/c.jsp\n')
+  const noRemote = fakeRun(['d.jsp'], { upload: ago(200), done: true })
+  writeFileSync(noRemote.path('plan.tsv'), 'M\t/c/repo/src/main/webapp/d.jsp\t\taaa\tbbb\t\n')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [])
+  const why = new Map(p.keptOther.map((x) => [x.id, x.reason]))
+  for (const r of [missing, empty, broken, noRemote]) assert.match(why.get(r.id) ?? '', /plan\.tsv/, r.id)
+  pruneBackups(fx, null, 'test', NOW)
+  for (const r of [missing, empty, broken, noRemote]) assert.ok(openRun(r.id).has('backup'), r.id)
+})
+
+test('plan.tsv 가 깨진 업로드 run 은 다른 run 의 보호를 푸는 "나중 업로드"로 세지 않는다', () => {
+  reset()
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  const b = fakeRun(['a.jsp'], { upload: ago(150), verified: true })
+  writeFileSync(b.path('plan.tsv'), 'M\t/c/repo/src/main/webapp/a.jsp\t/app/a.jsp\taaa\tbbb\t\nM\t/c/repo/x\n')
+  assert.deepEqual(ids(), [])
+  assert.deepEqual(prunePlan(fx, NOW).keptLatest, [a.id])
+})
+
+test('CLI 목록(글자·--json)에 plan.tsv 가 깨져 남기는 이유가 보인다', () => {
+  reset()
+  const missing = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  rmSync(missing.path('plan.tsv'))
+  const text = cli('prune', '--target', 'fx')
+  assert.equal(text.code, 0, text.out)
+  assert.match(text.out, new RegExp(`남김.*${missing.id}.*plan\\.tsv`))
+  const json = cli('prune', '--target', 'fx', '--json')
+  assert.equal(json.code, 0, json.out)
+  const p = JSON.parse(json.out)
+  assert.deepEqual(p.items, [])
+  assert.equal(p.keptOther[0].id, missing.id)
+  assert.match(p.keptOther[0].reason, /plan\.tsv/)
 })
