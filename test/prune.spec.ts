@@ -96,9 +96,30 @@ const START = Date.now()
 const agoNow = (days: number) => START - days * DAY
 /** CLI 를 자식 프로세스로 부른다(같은 임시 PRODDEPLOY_HOME). */
 function cli(...args: string[]): { code: number; out: string } {
-  const r = spawnSync(process.execPath, [CLI, ...args], { env: { ...process.env, PRODDEPLOY_HOME: `${tmp}/home` }, encoding: 'utf8' })
+  return cliWith([], {}, ...args)
+}
+function cliWith(nodeArgs: string[], env: Record<string, string>, ...args: string[]): { code: number; out: string } {
+  const r = spawnSync(process.execPath, [...nodeArgs, CLI, ...args], { env: { ...process.env, PRODDEPLOY_HOME: `${tmp}/home`, ...env }, encoding: 'utf8' })
   return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') }
 }
+
+/**
+ * CLI 자식 프로세스에서 run 하나의 backup 지우기를 실패시키는 모듈(--import 로 먼저 읽힘). 제품 코드는 바꾸지 않고
+ * node:fs 의 rmSync 를 바꾼 뒤 syncBuiltinESMExports 로 ESM 이름에도 반영한다. PD_FAIL_RUN 이름의 run 만 실패한다.
+ */
+const FAIL_RM = `data:text/javascript,${encodeURIComponent(
+  [
+    "import fs from 'node:fs'",
+    "import { syncBuiltinESMExports } from 'node:module'",
+    'const real = fs.rmSync',
+    'fs.rmSync = (p, o) => {',
+    "  const n = String(p).split(String.fromCharCode(92)).join('/')",
+    "  if (n.endsWith('/' + process.env.PD_FAIL_RUN + '/backup')) throw Object.assign(new Error('EBUSY: resource busy or locked, rmdir ' + n), { code: 'EBUSY' })",
+    '  return real(p, o)',
+    '}',
+    'syncBuiltinESMExports()'
+  ].join('\n')
+)}`
 
 /** 지금 목록의 확인 코드로 지운다(CLI 가 목록을 보고 --plan 을 주는 것과 같다). */
 const pruneAll = () => pruneBackups(fx, { code: prunePlan(fx, NOW).code }, 'test', NOW)
@@ -464,4 +485,18 @@ test('업로드 흔적이 있고 plan.tsv 가 깨진 run 은 부분 업로드·�
   const why = new Map(p.keptOther.map((x) => [x.id, x.reason]))
   assert.match(why.get(bash.id) ?? '', /plan\.tsv 없음/)
   assert.match(why.get(partial.id) ?? '', /plan\.tsv 2째 줄이 깨짐/)
+})
+
+test('CLI: 백업 삭제가 실패한 run 이 있으면 실패를 출력하고 0 아닌 종료로 끝난다(나머지 run 은 지움)', () => {
+  reset()
+  const stuck = fakeRun(['a.jsp'], { upload: agoNow(300), rolledBack: true })
+  const next = fakeRun(['b.jsp'], { upload: agoNow(200), rolledBack: true })
+  const code = /확인 코드: ([0-9a-f]{8})/.exec(cli('prune', '--target', 'fx').out)?.[1] ?? ''
+  assert.ok(code)
+  const r = cliWith(['--import', FAIL_RM], { PD_FAIL_RUN: stuck.id }, 'prune', '--target', 'fx', '--plan', code, '--yes')
+  assert.equal(r.code, 1, r.out)
+  assert.match(r.out, new RegExp(`실패.*${stuck.id}.*EBUSY.*backup`))
+  assert.match(r.out, new RegExp(`지움: ${next.id}`))
+  assert.ok(existsSync(stuck.path('backup/files/a.jsp')))
+  assert.equal(existsSync(next.path('backup')), false)
 })
