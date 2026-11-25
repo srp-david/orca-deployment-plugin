@@ -434,3 +434,17 @@ test('지우다 멈춘 run 도 다음 정리에서 지금의 보존 규칙을 �
   assert.ok(run.backupPruned(), '남은 백업이 온전한지 모르므로 되돌리기·업로드는 계속 막는다')
   await assert.rejects(rollback(run.id, run.code(), true), /백업 지움/)
 })
+
+test('링크·정션으로 읽힌 run 의 업로드는 다른 run 의 보호를 풀지 않는다', (t) => {
+  reset()
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true }) // 제자리의 진짜 마지막 run
+  const b = fakeRun(['a.jsp'], { upload: ago(100), verified: true })
+  const out = `${outsideDir('later')}/${b.id}`
+  renameSync(b.dir, out)
+  if (!junction(out, b.dir)) return t.skip('정션을 만들 수 없는 환경')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [], '정션 너머의 나중 업로드로는 a 를 지울 목록에 넣지 않는다')
+  assert.deepEqual(p.keptLatest, [a.id])
+  pruneAll()
+  assert.ok(existsSync(a.path('backup/files/a.jsp')))
+})
