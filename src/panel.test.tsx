@@ -265,6 +265,36 @@ test('run 기록: 백업 정리는 목록을 보여 준 뒤 확인해야 지우�
   await v.unmount()
 })
 
+test('run 기록: 백업 정리 후보가 11개 이상이어도 확인 전에 모두 보이고, 본 목록을 그대로 보낸다', async () => {
+  const pruned: { target: string; ids: string[] }[] = []
+  const ids = Array.from({ length: 12 }, (_, i) => `myapp-202607${String(i + 1).padStart(2, '0')}-100000-aaaaaa${String(i).padStart(2, '0')}`)
+  const items = ids.map((id, i) => ({ id, status: 'verified', statusLabel: '대조됨', subject: `PR ${100 + i}`, at: 0, bytes: 1024 }))
+  const plan = { days: 90, items, bytes: 12 * 1024, keptLatest: [], keptOther: [], code: 'abcd1234' }
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'prs.recent': [],
+        'runs.list': [],
+        'backups.prunePlan': plan,
+        'backups.prune': (input: { target: string; ids: string[] }) => {
+          pruned.push(input)
+          return { count: 12, bytes: 12 * 1024, skipped: [] }
+        }
+      }
+    })
+  })
+  await v.settled()
+  await v.select({ label: '운영 반영' }, 'runs')
+  await v.press({ text: '90일 지난 백업 정리' })
+  for (const x of items) assert.ok(v.find({ text: new RegExp(`· ${x.subject} — `) }), `${x.subject} 가 보여야 함`)
+  await v.press({ text: 'run 12개 백업 지우기' })
+  assert.deepEqual(pruned, [{ target: 'myapp', ids }])
+  await v.unmount()
+})
+
 test('run 기록: 백업 정리에서 다른 이유로 남기는 run 은 그 이유를 보여 준다', async () => {
   const plan = { days: 90, items: [], bytes: 0, keptLatest: [], keptOther: [{ id: 'myapp-20260701-100000-aaaaaaa3', reason: '업로드한 run 인데 plan.tsv 없음 — 올린 파일을 알 수 없어 남김' }] }
   const v = await mount(panel, {
