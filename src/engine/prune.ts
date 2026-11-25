@@ -2,8 +2,8 @@
 // 빼는 run: 부분 업로드, 업로드 시각을 모르는 run, 어느 운영 파일이든 그 파일을 마지막으로 올린 run.
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { acquireLock, indexedTargetIds, listRuns, openRun, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
-import { listTargetIds, loadTargetOrDeleted, type Target } from './target.ts'
+import { acquireLock, listRuns, openRun, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
+import type { Target } from './target.ts'
 import { dateTime } from './util.ts'
 
 export const BACKUP_DAYS = 90
@@ -53,22 +53,9 @@ function ageAt(run: Run): number | null {
   return run.createdAt()
 }
 
+// 같은 대상이라도 run 을 만들 때의 서버(호스트·포트)가 다르면 다른 파일이다.
 const destKey = (t: Target) => `${t.connection.host.toLowerCase()}:${t.connection.port ?? 21}`
 const fileKey = (run: Run, remote: string) => `${destKey(run.target)}\t${remote}`
-
-/** 모든 대상(지운 대상 포함)의 run. 같은 서버를 쓰는 다른 대상이 같은 운영 파일을 올렸을 수 있다. */
-function allRuns(): Run[] {
-  const ids = new Set([...listTargetIds(), ...indexedTargetIds()])
-  const out: Run[] = []
-  for (const id of ids) {
-    try {
-      out.push(...listRuns(loadTargetOrDeleted(id)))
-    } catch {
-      // 읽지 못하는 대상은 뺀다
-    }
-  }
-  return out
-}
 
 /**
  * 운영 파일마다, 모든 줄을 끝까지 올린 업로드(업로드됨·대조됨) 중 가장 나중 업로드 시각.
@@ -92,15 +79,18 @@ function latestUploads(runs: Run[]): Map<string, number> {
   return latest
 }
 
-/** 대상의 run 중 지금 백업을 지울 수 있는 것. 읽기만 한다. */
+/**
+ * 대상의 run 중 지금 백업을 지울 수 있는 것. 읽기만 한다.
+ * "나중에 올림"은 이 대상의 run 만 본다(되돌리기의 나중 run 판정과 같은 범위). 다른 대상은 같은 호스트·포트·경로라도
+ * FTP 계정마다 루트(chroot)가 달라 다른 파일일 수 있고, 이 대상의 잠금 밖에서 올리거나 되돌릴 수 있기 때문이다.
+ */
 export function prunePlan(t: Target, now = Date.now()): PrunePlan {
-  const everyone = allRuns()
-  const latest = latestUploads(everyone)
+  const runs = listRuns(t)
+  const latest = latestUploads(runs)
   const items: PruneItem[] = []
   const keptLatest: string[] = []
   const keptOther: KeptRun[] = []
-  for (const run of everyone) {
-    if (run.target.id !== t.id) continue
+  for (const run of runs) {
     if (run.backupPruned() || !hasBackup(run)) continue
     const status = run.status()
     if (status === 'partial') continue

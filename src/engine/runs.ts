@@ -239,14 +239,6 @@ function indexed(targetId: string): Map<string, string> {
   return m
 }
 
-/** run 색인에 이름이 있는 대상들(지운 대상 포함). */
-export function indexedTargetIds(): string[] {
-  const dir = join(home(), 'run-index')
-  if (!existsSync(dir)) return []
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.tsv'))
-    .map((f) => f.slice(0, -4))
-}
 
 /** 이 대상의 run 이 있을 수 있는 폴더들: 지금 설정, 색인, 지운 설정들. */
 function runDirsOf(targetId: string): string[] {
