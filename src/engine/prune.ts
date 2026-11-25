@@ -151,29 +151,37 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
     retry
   })
   for (const run of runs) {
-    if (run.pruneUnfinished()) {
-      // 지난 정리가 지우다 멈춘 run: 이미 일부를 지워 되돌릴 수 없다. 남은 백업을 마저 지운다(자리 검사는 그대로).
-      const unsafe = deleteProblem(run)
-      if (unsafe) keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
-      else items.push(itemOf(run, run.status(), ageAt(run) ?? run.createdAt(), true))
+    // 지난 정리가 지우다 멈춘 run 도 지금의 보존 규칙을 모두 거친다: 그 사이 나중 run 을 되돌렸으면 다시 마지막 run 일 수 있다.
+    // 규칙에 걸리면 지우지 않고 이유를 보인다. "지우는 중" 표시는 그대로 두어 되돌리기·업로드는 계속 막는다
+    // (남은 백업이 온전한지 알 수 없으므로).
+    const unfinished = run.pruneUnfinished()
+    if (!unfinished && (run.backupPruned() || !hasBackup(run))) continue
+    const keepUnfinished = (why: string) =>
+      keptOther.push({ id: run.id, reason: `지우다 멈춘 run — ${why}, 백업이 일부 지워졌을 수 있음` })
+    const status = run.status()
+    if (status === 'partial') {
+      if (unfinished) keepUnfinished('부분 업로드 run 이라 남김')
       continue
     }
-    if (run.backupPruned() || !hasBackup(run)) continue
-    const status = run.status()
-    if (status === 'partial') continue
     const at = ageAt(run)
-    if (at === null || now - at < BACKUP_DAYS * DAY) continue
+    if (at === null || now - at < BACKUP_DAYS * DAY) {
+      if (unfinished) keepUnfinished(at === null ? '업로드 시각을 몰라 남김' : `${BACKUP_DAYS}일이 지나지 않아 남김`)
+      continue
+    }
     const up = run.uploadAt()
     const broken = up !== null ? run.planProblem() : null
     if (broken) {
       // 업로드한 run 인데 무엇을 올렸는지 알 수 없다: 이 백업이 어느 파일의 유일한 이전본인지 판단할 수 없어 남긴다.
-      keptOther.push({ id: run.id, reason: `업로드한 run 인데 ${broken} — 올린 파일을 알 수 없어 남김` })
+      const why = `업로드한 run 인데 ${broken} — 올린 파일을 알 수 없어 남김`
+      if (unfinished) keepUnfinished(why)
+      else keptOther.push({ id: run.id, reason: why })
       continue
     }
     if (status !== 'rolledBack' && typeof up === 'number') {
       // 그 파일을 이 run 보다 나중에 올린 run 이 없으면, 이 백업이 그 변경 전 운영본의 유일한 사본일 수 있다.
       if (run.plan().some((row) => (latest.get(fileKey(run, row.remote)) ?? up) <= up)) {
-        keptLatest.push(run.id)
+        if (unfinished) keepUnfinished('지금 어느 운영 파일을 마지막으로 올린 run 이라 남김')
+        else keptLatest.push(run.id)
         continue
       }
     }
@@ -182,7 +190,7 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
       keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
       continue
     }
-    items.push(itemOf(run, status, at, false))
+    items.push(itemOf(run, status, at, unfinished))
   }
   items.sort((a, b) => a.at - b.at)
   const code = pruneCode(t.id, items.map((x) => x.id))
