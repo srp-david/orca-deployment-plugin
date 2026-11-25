@@ -68,13 +68,15 @@ function allRuns(): Run[] {
 }
 
 /**
- * 운영 파일마다, 되돌리지 않은 업로드(부분 업로드 포함) 중 가장 나중 업로드 시각.
- * 업로드 시각을 모르는 run 은 "나중"으로 치지 않는다: 그러면 앞 run 이 마지막으로 남아 백업을 지우지 않는 쪽이 된다.
+ * 운영 파일마다, 모든 줄을 끝까지 올린 업로드(업로드됨·대조됨) 중 가장 나중 업로드 시각.
+ * 부분 업로드는 "나중"으로 치지 않는다: 어느 줄이 실제로 올라갔는지 믿을 수 없고, 곧 되돌릴 상태라 되돌리면 앞 run 이
+ * 다시 마지막이 된다. 업로드 시각을 모르는 run 도 치지 않는다. 둘 다 앞 run 이 마지막으로 남아 백업을 지우지 않는 쪽이다.
  */
 function latestUploads(runs: Run[]): Map<string, number> {
   const latest = new Map<string, number>()
   for (const r of runs) {
-    if (r.status() === 'rolledBack') continue
+    const s = r.status()
+    if (s !== 'uploaded' && s !== 'verified') continue
     const at = r.uploadAt()
     if (typeof at !== 'number') continue
     for (const row of r.plan()) {
