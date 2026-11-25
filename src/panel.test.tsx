@@ -265,6 +265,27 @@ test('run 기록: 백업 정리는 목록을 보여 준 뒤 확인해야 지우�
   await v.unmount()
 })
 
+test('run 기록: 백업 정리에서 다른 이유로 남기는 run 은 그 이유를 보여 준다', async () => {
+  const plan = { days: 90, items: [], bytes: 0, keptLatest: [], keptOther: [{ id: 'myapp-20260701-100000-aaaaaaa3', reason: '업로드한 run 인데 plan.tsv 없음 — 올린 파일을 알 수 없어 남김' }] }
+  const v = await mount(panel, {
+    host: mockHost({
+      requests: {
+        'workspace.detect': { target: 'myapp', candidates: ['myapp'], known: true, name: 'my-app', path: 'C:/work/repos/my-app' },
+        'targets.list': targets,
+        'jobs.recent': [],
+        'prs.recent': [],
+        'runs.list': [],
+        'backups.prunePlan': plan
+      }
+    })
+  })
+  await v.settled()
+  await v.select({ label: '운영 반영' }, 'runs')
+  await v.press({ text: '90일 지난 백업 정리' })
+  assert.ok(v.find({ text: /남김: myapp-20260701-100000-aaaaaaa3 — 업로드한 run 인데 plan\.tsv 없음/ }))
+  await v.unmount()
+})
+
 test('백업을 지운 run 은 되돌리기·업로드 버튼이 없거나 꺼져 있다', async () => {
   const { v } = await planned('backedUp', { backupPruned: '2026-11-16 12:00:00' })
   assert.ok(v.find({ text: /백업 정리\(2026-11-16 12:00:00\)/ }))
