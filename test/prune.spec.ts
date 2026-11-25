@@ -500,3 +500,32 @@ test('CLI: 백업 삭제가 실패한 run 이 있으면 실패를 출력하고 0
   assert.ok(existsSync(stuck.path('backup/files/a.jsp')))
   assert.equal(existsSync(next.path('backup')), false)
 })
+
+test('backup.pruned 가 있으면 backup.pruning 이 남아 있어도 지우기가 끝난 것으로 본다', async () => {
+  reset()
+  const run = fakeRun(['a.jsp'], { upload: ago(200), verified: true }) // a.jsp 의 마지막 run
+  rmSync(run.path('backup'), { recursive: true })
+  writeFileSync(run.path('backup.pruned'), '2026-08-01 00:00:00\n1000\n')
+  writeFileSync(run.path('backup.pruning'), '2026-08-01 00:00:00\n1000\n') // 지운 뒤 표시를 치우지 못함
+  assert.equal(run.pruneUnfinished(), false)
+  assert.equal(run.backupPruned(), '2026-08-01 00:00:00', '보통의 "지움" 표시')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items, [])
+  assert.deepEqual(p.keptOther, [], '"지우다 멈춘 run" 으로 남기지 않는다')
+  await assert.rejects(rollback(run.id, run.code(), true), /백업 지움/)
+})
+
+test('다 지운 뒤 backup.pruning 을 치우지 못해도 실패로 보고하지 않는다', () => {
+  reset()
+  const run = fakeRun(['a.jsp'], { upload: ago(200), rolledBack: true })
+  // 치울 수 없는 지우는 중 표시(파일 자리에 폴더): 지난 정리가 지우다 멈춘 것처럼 보인다
+  mkdirSync(run.path('backup.pruning'))
+  writeFileSync(run.path('backup.pruning/x'), 'x')
+  const r = pruneAll()
+  assert.deepEqual(r.failed, [])
+  assert.deepEqual(r.pruned.map((x) => x.id), [run.id])
+  assert.equal(existsSync(run.path('backup')), false)
+  assert.ok(run.has('backup.pruned'))
+  assert.equal(openRun(run.id).pruneUnfinished(), false)
+  assert.doesNotMatch(run.text('deploy.log'), /백업 정리 중 실패/)
+})
