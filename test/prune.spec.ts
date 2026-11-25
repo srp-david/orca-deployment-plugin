@@ -266,3 +266,35 @@ test('CLI 목록(글자·--json)에 plan.tsv 가 깨져 남기는 이유가 보�
   assert.equal(p.keptOther[0].id, missing.id)
   assert.match(p.keptOther[0].reason, /plan\.tsv/)
 })
+
+test('CLI: prune --yes 만으로는 지우지 않는다. 목록의 확인 코드를 --plan 으로 줘야 지운다', () => {
+  reset()
+  const old = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  fakeRun(['a.jsp'], { upload: ago(100), verified: true })
+  const bare = cli('prune', '--target', 'fx', '--yes')
+  assert.notEqual(bare.code, 0, bare.out)
+  assert.match(bare.out, /다시 목록/)
+  assert.ok(openRun(old.id).has('backup'), '--plan 없이는 아무것도 지우지 않음')
+  const list = cli('prune', '--target', 'fx')
+  const code = /확인 코드: ([0-9a-f]{8})/.exec(list.out)?.[1] ?? ''
+  assert.ok(code, list.out)
+  assert.match(list.out, new RegExp(`--plan ${code} --yes`))
+  const done = cli('prune', '--target', 'fx', '--plan', code, '--yes')
+  assert.equal(done.code, 0, done.out)
+  assert.equal(openRun(old.id).has('backup'), false)
+})
+
+test('CLI: 목록을 본 뒤 지울 run 이 바뀌면(새 run 이 90일을 채움) 옛 확인 코드로는 지우지 않는다', () => {
+  reset()
+  const old = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  const mid = fakeRun(['a.jsp'], { upload: ago(50), verified: true })
+  fakeRun(['a.jsp'], { upload: ago(10), verified: true })
+  const list = cli('prune', '--target', 'fx')
+  assert.match(list.out, new RegExp(old.id))
+  const code = /확인 코드: ([0-9a-f]{8})/.exec(list.out)?.[1] ?? ''
+  writeFileSync(mid.path('upload.started'), `x\n${Date.now() - 100 * DAY}\n`)
+  const stale = cli('prune', '--target', 'fx', '--plan', code, '--yes')
+  assert.notEqual(stale.code, 0, stale.out)
+  assert.match(stale.out, /다시 목록/)
+  assert.ok(openRun(old.id).has('backup') && openRun(mid.id).has('backup'), '아무것도 지우지 않음')
+})

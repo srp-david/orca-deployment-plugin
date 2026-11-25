@@ -616,7 +616,7 @@ async function scenarios(tip1: string): Promise<void> {
     assert.match(r.out, /막힘/)
   })
 
-  await step('백업 정리: --yes 없으면 목록만, 있으면 90일 지난 백업만 지우고 기록은 남김', () => {
+  await step('백업 정리: --yes 없으면 목록만, 목록의 확인 코드와 --yes 면 90일 지난 백업만 지우고 기록은 남김', () => {
     const fresh = cli('prune', '--target', 'fx')
     assert.equal(fresh.code, 0, fresh.out)
     assert.match(fresh.out, /90일 지난 run 0개/)
@@ -629,7 +629,12 @@ async function scenarios(tip1: string): Promise<void> {
     const list = cli('prune', '--target', 'fx')
     assert.match(list.out, new RegExp(`${id}\t되돌림`))
     assert.ok(existsSync(`${dir}/backup`), '목록만 보고는 지우지 않음')
-    const done = cli('prune', '--target', 'fx', '--yes')
+    const bare = cli('prune', '--target', 'fx', '--yes')
+    assert.notEqual(bare.code, 0, bare.out)
+    assert.ok(existsSync(`${dir}/backup`), '확인 코드 없이 --yes 만으로는 지우지 않음')
+    const code = codeOf(list.out)
+    assert.ok(code, list.out)
+    const done = cli('prune', '--target', 'fx', '--plan', code, '--yes')
     assert.equal(done.code, 0, done.out)
     assert.match(done.out, new RegExp(`지움: ${id}`))
     assert.equal(existsSync(`${dir}/backup`), false)
