@@ -1289,16 +1289,12 @@ function RunsTab() {
             <Text size="xs">
               {`${offer.days}일 지난 run 의 백업 파일을 지웁니다. run 기록과 "반영됨" 표시는 남지만, 지운 run 은 되돌릴 수 없고 되살릴 수도 없습니다. 부분 업로드 run 과 어느 운영 파일을 마지막으로 올린 run${offer.keptLatest.length ? `(${offer.keptLatest.length}개)` : ''}은 남깁니다.`}
             </Text>
-            {offer.items.slice(0, 10).map((x) => (
+            {/* 지울 후보는 모두 보인다: 버튼은 이 목록 전부를 보내므로 사람이 보지 않은 run 이 없게. */}
+            {offer.items.map((x) => (
               <Text key={x.id} size="xs" muted>
                 {`· ${x.subject || x.id} — ${x.statusLabel} · ${size(x.bytes)}`}
               </Text>
             ))}
-            {offer.items.length > 10 && (
-              <Text size="xs" muted>
-                {`… 외 ${offer.items.length - 10}개`}
-              </Text>
-            )}
             {keptOtherOf(offer).map((x) => (
               <Text key={`kept-${x.id}`} size="xs">
                 {`남김: ${x.id} — ${x.reason}`}
