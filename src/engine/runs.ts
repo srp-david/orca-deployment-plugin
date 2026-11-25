@@ -2,7 +2,8 @@
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
 // pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
 // backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김),
-// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다), backup.pruned(백업 정리로 backup/ 을 지움, ADR 0006).
+// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다), backup.pruned(백업 정리로 backup/ 을 지움, ADR 0006),
+// backup.pruning(백업 정리가 지우는 중. 끝나면 backup.pruned 로 바뀐다. 남아 있으면 지우다 멈춘 것).
 import {
   appendFileSync,
   existsSync,
@@ -179,7 +180,13 @@ export class Run {
 
   /** 백업 정리로 백업 파일을 지웠으면 그 시각(글자). 지운 run 은 되돌리기·업로드·다시 백업을 하지 않는다(ADR 0006). */
   backupPruned(): string | null {
+    if (this.pruneUnfinished()) return `${this.text('backup.pruning').split('\n')[0].trim() || '?'} 지우다 멈춤, 일부 남음`
     return this.has('backup.pruned') ? this.text('backup.pruned').split('\n')[0].trim() || '?' : null
+  }
+
+  /** 백업 정리가 지우는 중에 멈췄는가(backup.pruning 이 남음). 백업 지움과 같이 막고, 다음 백업 정리가 남은 백업을 다시 지운다. */
+  pruneUnfinished(): boolean {
+    return this.has('backup.pruning')
   }
 
   /** 업로드를 시작한 적이 있는가(끝났든 아니든). */

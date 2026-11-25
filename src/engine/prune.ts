@@ -12,7 +12,16 @@ const DAY = 24 * 60 * 60 * 1000
 /** 지우는 폴더: 백업과, 중간에 끊긴 백업이 남긴 임시 폴더. */
 const DIRS = ['backup', 'backup.tmp']
 
-export type PruneItem = { id: string; status: RunStatus; statusLabel: string; subject: string; at: number; bytes: number }
+export type PruneItem = {
+  id: string
+  status: RunStatus
+  statusLabel: string
+  subject: string
+  at: number
+  bytes: number
+  /** 지난 백업 정리가 지우다 멈춘 run: 남은 백업을 마저 지운다. */
+  retry: boolean
+}
 export type PrunePlan = {
   days: number
   items: PruneItem[]
@@ -25,6 +34,9 @@ export type PrunePlan = {
   code: string
 }
 export type KeptRun = { id: string; reason: string }
+/** 지우다 실패한 run 과 그 오류(경로 포함). */
+export type PruneFailure = { id: string; error: string }
+export type PruneResult = { pruned: PruneItem[]; skipped: string[]; failed: PruneFailure[] }
 
 /** 크기 합. 링크·정션은 따라가지 않는다(바깥 트리나 순환 링크를 세지 않게). */
 function sizeOf(path: string): number {
@@ -129,7 +141,23 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
   const items: PruneItem[] = []
   const keptLatest: string[] = []
   const keptOther: KeptRun[] = []
+  const itemOf = (run: Run, status: RunStatus, at: number, retry: boolean): PruneItem => ({
+    id: run.id,
+    status,
+    statusLabel: STATUS_LABEL[status],
+    subject: /plan: (.*) \(기준 /.exec(run.text('deploy.log'))?.[1] ?? '',
+    at,
+    bytes: DIRS.reduce((n, d) => n + sizeOf(run.path(d)), 0),
+    retry
+  })
   for (const run of runs) {
+    if (run.pruneUnfinished()) {
+      // 지난 정리가 지우다 멈춘 run: 이미 일부를 지워 되돌릴 수 없다. 남은 백업을 마저 지운다(자리 검사는 그대로).
+      const unsafe = deleteProblem(run)
+      if (unsafe) keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
+      else items.push(itemOf(run, run.status(), ageAt(run) ?? run.createdAt(), true))
+      continue
+    }
     if (run.backupPruned() || !hasBackup(run)) continue
     const status = run.status()
     if (status === 'partial') continue
@@ -154,8 +182,7 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
       keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
       continue
     }
-    const subject = /plan: (.*) \(기준 /.exec(run.text('deploy.log'))?.[1] ?? ''
-    items.push({ id: run.id, status, statusLabel: STATUS_LABEL[status], subject, at, bytes: DIRS.reduce((n, d) => n + sizeOf(run.path(d)), 0) })
+    items.push(itemOf(run, status, at, false))
   }
   items.sort((a, b) => a.at - b.at)
   const code = pruneCode(t.id, items.map((x) => x.id))
@@ -167,8 +194,16 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
  * - run 이름들(패널): 그중 지금도 지울 수 있는 것만 지운다.
  * - 확인 코드(CLI): 지금 지울 목록의 코드와 같을 때만 그 목록 전부를 지운다. 다르면 아무것도 지우지 않고 멈춘다.
  * 대상 잠금 안에서 다시 판단한다: 그 사이 업로드·되돌리기가 끼지 않게.
+ * 한 run 을 지우다 실패해도 나머지 run 은 계속 지우고, 실패는 결과의 failed 와 그 run 의 로그에 남긴다.
+ * remove 는 폴더 하나를 지우는 함수다(시험에서 삭제 실패를 만들 때만 바꾼다).
  */
-export function pruneBackups(t: Target, pick: string[] | { code: string }, by = 'cli', now = Date.now()): { pruned: PruneItem[]; skipped: string[] } {
+export function pruneBackups(
+  t: Target,
+  pick: string[] | { code: string },
+  by = 'cli',
+  now = Date.now(),
+  remove: (path: string) => void = (path) => rmSync(path, { recursive: true, force: true })
+): PruneResult {
   const release = acquireLock({ target: t.id, run: '-', step: 'prune', by })
   try {
     const plan = prunePlan(t, now)
@@ -185,20 +220,35 @@ export function pruneBackups(t: Target, pick: string[] | { code: string }, by = 
       chosen = plan.items
     }
     const pruned: PruneItem[] = []
+    const failed: PruneFailure[] = []
     for (const item of chosen) {
-      const run = openRun(item.id)
-      // 지우기 바로 전에 자리를 다시 본다: 판단한 뒤 링크로 바뀌었으면 지우지 않는다.
-      if (deleteProblem(run)) {
-        skipped.push(item.id)
-        continue
+      let run: Run | null = null
+      try {
+        run = openRun(item.id)
+        // 지우기 바로 전에 자리를 다시 본다: 판단한 뒤 링크로 바뀌었으면 지우지 않는다.
+        if (deleteProblem(run)) {
+          skipped.push(item.id)
+          continue
+        }
+        // "지우는 중" 표시를 먼저 남긴다: 지우다 끊겨도 반쯤 남은 백업으로 되돌리거나 올리지 않게(백업 지움처럼 막는다).
+        // 다 지운 뒤에 "지움" 표시로 바꾼다. 지우는 중으로 남은 run 은 다음 정리가 마저 지운다.
+        if (!run.pruneUnfinished()) run.write('backup.pruning', `${dateTime()}\n${item.bytes}\n`)
+        for (const d of DIRS) remove(run.path(d))
+        run.write('backup.pruned', `${dateTime()}\n${item.bytes}\n`)
+        run.remove('backup.pruning')
+        run.log(`백업 정리: ${BACKUP_DAYS}일 지남 — ${item.retry ? '지우다 멈춘 ' : ''}백업 파일을 지움(${item.bytes} 바이트, ${by}). 이 run 은 되돌릴 수 없음`)
+        pruned.push(item)
+      } catch (e) {
+        const error = (e as Error).message
+        failed.push({ id: item.id, error })
+        try {
+          run?.log(`백업 정리 중 실패(일부 남음): ${error} — 이 run 은 되돌릴 수 없음. 다음 백업 정리에서 남은 백업을 다시 지움`)
+        } catch {
+          // 로그도 못 쓰면 결과의 failed 로만 알린다
+        }
       }
-      // 표시를 먼저 남긴다: 지우다 끊겨도 반쯤 남은 백업으로 되돌리거나 올리지 않게.
-      run.write('backup.pruned', `${dateTime()}\n${item.bytes}\n`)
-      for (const d of DIRS) rmSync(run.path(d), { recursive: true, force: true })
-      run.log(`백업 정리: ${BACKUP_DAYS}일 지남 — 백업 파일을 지움(${item.bytes} 바이트, ${by}). 이 run 은 되돌릴 수 없음`)
-      pruned.push(item)
     }
-    return { pruned, skipped }
+    return { pruned, skipped, failed }
   } finally {
     release()
   }

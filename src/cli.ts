@@ -226,7 +226,7 @@ async function main(): Promise<number> {
         if (json) say(JSON.stringify(p))
         else {
           say(`백업 정리 — ${t.label}: ${p.days}일 지난 run ${p.items.length}개, ${kb(p.bytes)}`)
-          for (const x of p.items) say(`${x.id}\t${STATUS_LABEL[x.status]}\t${kb(x.bytes)}\t${x.subject}`)
+          for (const x of p.items) say(`${x.id}\t${STATUS_LABEL[x.status]}\t${kb(x.bytes)}\t${x.subject}${x.retry ? '\t(지난 정리가 지우다 멈춤 — 남은 백업을 마저 지움)' : ''}`)
           if (p.keptLatest.length) say(`남김(어느 운영 파일을 마지막으로 올린 run): ${p.keptLatest.join(', ')}`)
           for (const x of p.keptOther) say(`남김: ${x.id} — ${x.reason}`)
           if (p.items.length) {
@@ -243,9 +243,10 @@ async function main(): Promise<number> {
       if (json) say(JSON.stringify(r))
       else {
         for (const x of r.pruned) say(`지움: ${x.id}\t${kb(x.bytes)}`)
-        say(`백업 정리 완료: ${r.pruned.length}개, ${kb(r.pruned.reduce((n, x) => n + x.bytes, 0))}`)
+        for (const x of r.failed) say(`실패(일부 남음, 다음 정리에서 다시 지움): ${x.id} — ${x.error}`)
+        say(`백업 정리 ${r.failed.length ? '중 실패 있음' : '완료'}: ${r.pruned.length}개, ${kb(r.pruned.reduce((n, x) => n + x.bytes, 0))}${r.failed.length ? ` · 실패 ${r.failed.length}개` : ''}`)
       }
-      return 0
+      return r.failed.length ? 1 : 0
     }
 
     case 'unlock': {

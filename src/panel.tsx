@@ -249,8 +249,17 @@ async function confirmPrune(): Promise<void> {
   if (!target || !offer) return
   set(pruneOffer, null)
   const r = await ask(() => plugin.request('backups.prune', { target, ids: offer.items.map((x) => x.id) }))
-  if (r)
-    set(runsNotice, `${r.count}개 run 의 백업을 지움(${size(r.bytes)}) — run 기록은 그대로 있음${r.skipped.length ? ` · ${r.skipped.length}개는 그 사이 상태가 바뀌어 남김` : ''}`)
+  if (r) {
+    // 예전 워커는 failed 칸이 없다
+    const failed = r.failed ?? []
+    set(
+      runsNotice,
+      `${r.count}개 run 의 백업을 지움(${size(r.bytes)}) — run 기록은 그대로 있음${r.skipped.length ? ` · ${r.skipped.length}개는 그 사이 상태가 바뀌어 남김` : ''}` +
+        (failed.length
+          ? ` · ${failed.length}개는 지우다 실패(일부 남음, 다음 정리에서 다시 지움): ${failed.map((x) => `${x.id} — ${x.error}`).join(' / ')}`
+          : '')
+    )
+  }
   await loadRuns()
 }
 
@@ -1292,7 +1301,7 @@ function RunsTab() {
             {/* 지울 후보는 모두 보인다: 버튼은 이 목록 전부를 보내므로 사람이 보지 않은 run 이 없게. */}
             {offer.items.map((x) => (
               <Text key={x.id} size="xs" muted>
-                {`· ${x.subject || x.id} — ${x.statusLabel} · ${size(x.bytes)}`}
+                {`· ${x.subject || x.id} — ${x.statusLabel} · ${size(x.bytes)}${x.retry ? ' · 지난 정리가 지우다 멈춤(남은 백업을 마저 지움)' : ''}`}
               </Text>
             ))}
             {keptOtherOf(offer).map((x) => (

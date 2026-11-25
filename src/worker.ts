@@ -622,7 +622,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('backups.prune', ({ target, ids }) =>
     guard(() => {
       const r = pruneBackups(loadTarget(target), ids, 'panel')
-      return { count: r.pruned.length, bytes: r.pruned.reduce((n, x) => n + x.bytes, 0), skipped: r.skipped }
+      return { count: r.pruned.length, bytes: r.pruned.reduce((n, x) => n + x.bytes, 0), skipped: r.skipped, failed: r.failed }
     })
   )
 

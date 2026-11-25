@@ -117,7 +117,11 @@ declare module 'orca' {
     /** 백업 정리로 지울 수 있는 run 과 크기(읽기만). runs 에는 빼고 남기는 run 도 알려 준다. */
     'backups.prunePlan': { input: { target: string }; output: PrunePlan }
     /** 백업 정리: ids 중 지금도 지울 수 있는 run 의 백업만 지운다(사람이 본 목록보다 더 지우지 않음). */
-    'backups.prune': { input: { target: string; ids: string[] }; output: { count: number; bytes: number; skipped: string[] } }
+    'backups.prune': {
+      input: { target: string; ids: string[] }
+      /** failed: 지우다 실패한 run 과 오류(일부 남음, 다음 정리에서 다시 지움). */
+      output: { count: number; bytes: number; skipped: string[]; failed: { id: string; error: string }[] }
+    }
     'run.get': { input: { id: string }; output: { view: RunView; log: string[] } }
     /** 끝난 작업이 남긴 잠금을 푼다. 살아 있는 작업의 잠금이면 거절. */
     'lock.clear': { input: { target: string }; output: { message: string } }
