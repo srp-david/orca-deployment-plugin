@@ -6,9 +6,11 @@
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync
@@ -250,6 +252,30 @@ function runDirsOf(targetId: string): string[] {
   for (const t of targetHistory(targetId)) add(runsDir(t))
   for (const dir of indexed(targetId).values()) add(dirname(dir))
   return dirs
+}
+
+/** 경로 비교용: 슬래시 통일, 끝 슬래시 뺌, Windows 면 대소문자 무시. */
+const samePathKey = (p: string) => {
+  const n = p.replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+/**
+ * run 폴더가 이 대상의 run 기록 폴더 바로 아래의 진짜 폴더인가: 링크·정션이 아니고, 실경로도 그 아래. 아니면 그 이유.
+ * 지우는 일(백업 정리)이 링크를 따라 run 기록 폴더 밖을 건드리지 않게 쓴다.
+ */
+export function runDirProblem(run: Run): string | null {
+  try {
+    if (lstatSync(run.dir).isSymbolicLink()) return `run 폴더가 링크(정션)임: ${run.dir}`
+    const real = samePathKey(realpathSync.native(run.dir))
+    const homes = runDirsOf(run.target.id)
+      .filter((d) => existsSync(d))
+      .map((d) => samePathKey(realpathSync.native(d)))
+    if (!homes.some((d) => real === `${d}/${samePathKey(run.id)}`)) return `run 폴더의 실경로가 run 기록 폴더 밖(링크·정션을 따라감): ${real}`
+    return null
+  } catch (e) {
+    return `run 폴더를 확인하지 못함: ${(e as Error).message}`
+  }
 }
 
 function findRunDir(id: string, targetId: string): string | null {

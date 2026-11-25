@@ -1,8 +1,8 @@
 // 백업 정리(ADR 0006): 90일 지난 run 의 backup/ 만 지우고 run 기록은 남긴다. 사람이 목록을 보고 확인할 때만 지운다.
 // 빼는 run: 부분 업로드, 업로드 시각을 모르는 run, 어느 운영 파일이든 그 파일을 마지막으로 올린 run.
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { acquireLock, listRuns, openRun, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
+import { acquireLock, listRuns, openRun, runDirProblem, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
 import type { Target } from './target.ts'
 import { dateTime, sha256, Stop } from './util.ts'
 
@@ -26,13 +26,45 @@ export type PrunePlan = {
 }
 export type KeptRun = { id: string; reason: string }
 
+/** 크기 합. 링크·정션은 따라가지 않는다(바깥 트리나 순환 링크를 세지 않게). */
 function sizeOf(path: string): number {
-  if (!existsSync(path)) return 0
-  const s = statSync(path)
+  let s
+  try {
+    s = lstatSync(path)
+  } catch {
+    return 0
+  }
+  if (s.isSymbolicLink()) return 0
   if (!s.isDirectory()) return s.size
   let n = 0
   for (const e of readdirSync(path)) n += sizeOf(join(path, e))
   return n
+}
+
+/**
+ * 지워도 되는 자리인가: run 폴더가 이 대상의 run 기록 폴더 안의 진짜 폴더이고, 지울 폴더(backup, backup.tmp)도 링크·정션이
+ * 아니며 실경로가 그 run 폴더 안. 아니면 그 이유. 링크를 따라 run 기록 폴더 밖을 지우지 않게.
+ */
+function deleteProblem(run: Run): string | null {
+  const bad = runDirProblem(run)
+  if (bad) return bad
+  try {
+    const home = realpathSync.native(run.dir)
+    for (const d of DIRS) {
+      const p = run.path(d)
+      let s
+      try {
+        s = lstatSync(p)
+      } catch {
+        continue // 없음
+      }
+      if (s.isSymbolicLink()) return `${d} 가 링크(정션)임: ${p}`
+      if (realpathSync.native(p).toLowerCase() !== join(home, d).toLowerCase()) return `${d} 의 실경로가 run 폴더 밖(링크·정션을 따라감): ${p}`
+    }
+    return null
+  } catch (e) {
+    return `백업 폴더를 확인하지 못함: ${(e as Error).message}`
+  }
 }
 
 const hasBackup = (run: Run) => DIRS.some((d) => run.has(d))
@@ -117,6 +149,11 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
         continue
       }
     }
+    const unsafe = deleteProblem(run)
+    if (unsafe) {
+      keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
+      continue
+    }
     const subject = /plan: (.*) \(기준 /.exec(run.text('deploy.log'))?.[1] ?? ''
     items.push({ id: run.id, status, statusLabel: STATUS_LABEL[status], subject, at, bytes: DIRS.reduce((n, d) => n + sizeOf(run.path(d)), 0) })
   }
@@ -135,24 +172,31 @@ export function pruneBackups(t: Target, pick: string[] | { code: string }, by = 
   const release = acquireLock({ target: t.id, run: '-', step: 'prune', by })
   try {
     const plan = prunePlan(t, now)
-    let pruned: PruneItem[]
-    let skipped: string[] = []
+    let chosen: PruneItem[]
+    const skipped: string[] = []
     if (Array.isArray(pick)) {
       const want = new Set(pick)
-      pruned = plan.items.filter((x) => want.has(x.id))
-      skipped = pick.filter((id) => !pruned.some((x) => x.id === id))
+      chosen = plan.items.filter((x) => want.has(x.id))
+      skipped.push(...pick.filter((id) => !chosen.some((x) => x.id === id)))
     } else {
       // 지금 코드를 알려 주지 않는다: 목록을 다시 보고 그 코드를 쓰게.
       if (pick.code !== plan.code)
         throw new Stop(`확인 코드가 지금 지울 목록과 다름(그 사이 지울 run 이 바뀌었을 수 있음) — 아무것도 지우지 않음. 다시 목록을 보세요(prune --target ${t.id})`)
-      pruned = plan.items
+      chosen = plan.items
     }
-    for (const item of pruned) {
+    const pruned: PruneItem[] = []
+    for (const item of chosen) {
       const run = openRun(item.id)
+      // 지우기 바로 전에 자리를 다시 본다: 판단한 뒤 링크로 바뀌었으면 지우지 않는다.
+      if (deleteProblem(run)) {
+        skipped.push(item.id)
+        continue
+      }
       // 표시를 먼저 남긴다: 지우다 끊겨도 반쯤 남은 백업으로 되돌리거나 올리지 않게.
       run.write('backup.pruned', `${dateTime()}\n${item.bytes}\n`)
       for (const d of DIRS) rmSync(run.path(d), { recursive: true, force: true })
       run.log(`백업 정리: ${BACKUP_DAYS}일 지남 — 백업 파일을 지움(${item.bytes} 바이트, ${by}). 이 run 은 되돌릴 수 없음`)
+      pruned.push(item)
     }
     return { pruned, skipped }
   } finally {
