@@ -448,3 +448,20 @@ test('링크·정션으로 읽힌 run 의 업로드는 다른 run 의 보호를 
   pruneAll()
   assert.ok(existsSync(a.path('backup/files/a.jsp')))
 })
+
+test('업로드 흔적이 있고 plan.tsv 가 깨진 run 은 부분 업로드·시각 불명이어도 남기는 이유를 보인다', () => {
+  reset()
+  // bash 시절: 로그에 업로드 시작만 있고(시각 모름) plan.tsv 가 없다
+  const bash = fakeRun(['a.jsp'], { upload: 'bash' })
+  rmSync(bash.path('plan.tsv'))
+  assert.equal(bash.uploadAt(), 'unknown')
+  // 날짜를 아는 부분 업로드인데 plan.tsv 의 한 줄이 깨졌다
+  const partial = fakeRun(['b.jsp'], { upload: ago(200), done: false, uploadedRows: 0 })
+  writeFileSync(partial.path('plan.tsv'), 'M\t/c/repo/src/main/webapp/b.jsp\t/app/b.jsp\taaa\tbbb\t\nM\t/c/repo/x\n')
+  assert.equal(partial.status(), 'partial')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items, [])
+  const why = new Map(p.keptOther.map((x) => [x.id, x.reason]))
+  assert.match(why.get(bash.id) ?? '', /plan\.tsv 없음/)
+  assert.match(why.get(partial.id) ?? '', /plan\.tsv 2째 줄이 깨짐/)
+})
