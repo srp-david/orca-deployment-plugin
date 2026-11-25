@@ -2,7 +2,7 @@
 // 사용법: node --test test/prune.spec.ts
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -300,4 +300,65 @@ test('CLI: 목록을 본 뒤 지울 run 이 바뀌면(새 run 이 90일을 채�
   assert.notEqual(stale.code, 0, stale.out)
   assert.match(stale.out, /다시 목록/)
   assert.ok(openRun(old.id).has('backup') && openRun(mid.id).has('backup'), '아무것도 지우지 않음')
+})
+
+/** 디렉터리 정션을 만든다(Windows 는 관리자 권한 없이 된다). 만들 수 없는 환경이면 false — 그 시험은 건너뛴다. */
+function junction(target: string, path: string): boolean {
+  try {
+    symlinkSync(target, path, 'junction')
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 임시 폴더 안에 run 기록 폴더 바깥 자리를 새로 만든다. */
+function outsideDir(name: string): string {
+  const d = `${tmp}/outside/${name}`
+  rmSync(d, { recursive: true, force: true })
+  mkdirSync(d, { recursive: true })
+  return d
+}
+
+test('run 폴더 자리의 정션이 가리키는 바깥 run 의 백업은 지우지 않고 이유를 보인다', (t) => {
+  reset()
+  const run = fakeRun(['a.jsp'], { upload: ago(200), rolledBack: true }) // 되돌린 run: 제자리면 지울 목록에 든다
+  const out = `${outsideDir('run')}/${run.id}`
+  renameSync(run.dir, out)
+  if (!junction(out, run.dir)) return t.skip('정션을 만들 수 없는 환경')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [])
+  assert.match(p.keptOther.find((x) => x.id === run.id)?.reason ?? '', /링크/)
+  pruneAll()
+  assert.ok(existsSync(`${out}/backup/files/a.jsp`), '바깥 run 의 백업이 남음')
+})
+
+test('backup 폴더가 정션이면 따라가지 않고 남긴다', (t) => {
+  reset()
+  const run = fakeRun(['a.jsp'], { upload: ago(200), rolledBack: true })
+  const out = outsideDir('backup')
+  mkdirSync(`${out}/files`)
+  writeFileSync(`${out}/files/keep.jsp`, 'k')
+  rmSync(run.path('backup'), { recursive: true })
+  if (!junction(out, run.path('backup'))) return t.skip('정션을 만들 수 없는 환경')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [])
+  assert.match(p.keptOther.find((x) => x.id === run.id)?.reason ?? '', /링크/)
+  pruneAll()
+  assert.ok(existsSync(`${out}/files/keep.jsp`))
+})
+
+test('백업 안의 정션은 따라가지 않는다: 바깥 파일은 크기에 들지 않고 지워지지 않는다(순환 링크 포함)', (t) => {
+  reset()
+  const run = fakeRun(['a.jsp'], { upload: ago(200), rolledBack: true })
+  const out = outsideDir('inner')
+  writeFileSync(`${out}/big.bin`, 'y'.repeat(5000))
+  if (!junction(out, run.path('backup/files/out'))) return t.skip('정션을 만들 수 없는 환경')
+  assert.ok(junction(run.path('backup'), run.path('backup/files/loop')), '순환 정션')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [run.id])
+  assert.equal(p.items[0].bytes, 1000, '백업 자신의 파일만 센다')
+  pruneAll()
+  assert.equal(existsSync(run.path('backup')), false)
+  assert.ok(existsSync(`${out}/big.bin`), '바깥 파일은 남음')
 })
