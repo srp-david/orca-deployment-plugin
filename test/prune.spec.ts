@@ -91,7 +91,10 @@ function reset() {
 const ids = (t = fx) => prunePlan(t, NOW).items.map((x) => x.id)
 
 const CLI = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
-/** CLI 를 자식 프로세스로 부른다(같은 임시 PRODDEPLOY_HOME). 시각은 진짜 지금이라 run 나이는 며칠 어긋나도 되게 잡는다. */
+/** CLI 시험의 기준 시각: CLI 는 진짜 지금으로 판단하므로 run 나이도 시험을 시작한 시각에서 잰다(날짜가 지나도 같은 결과). */
+const START = Date.now()
+const agoNow = (days: number) => START - days * DAY
+/** CLI 를 자식 프로세스로 부른다(같은 임시 PRODDEPLOY_HOME). */
 function cli(...args: string[]): { code: number; out: string } {
   const r = spawnSync(process.execPath, [CLI, ...args], { env: { ...process.env, PRODDEPLOY_HOME: `${tmp}/home` }, encoding: 'utf8' })
   return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') }
@@ -267,7 +270,7 @@ test('plan.tsv 가 깨진 업로드 run 은 다른 run 의 보호를 푸는 "나
 
 test('CLI 목록(글자·--json)에 plan.tsv 가 깨져 남기는 이유가 보인다', () => {
   reset()
-  const missing = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  const missing = fakeRun(['a.jsp'], { upload: agoNow(200), verified: true })
   rmSync(missing.path('plan.tsv'))
   const text = cli('prune', '--target', 'fx')
   assert.equal(text.code, 0, text.out)
@@ -282,8 +285,8 @@ test('CLI 목록(글자·--json)에 plan.tsv 가 깨져 남기는 이유가 보�
 
 test('CLI: prune --yes 만으로는 지우지 않는다. 목록의 확인 코드를 --plan 으로 줘야 지운다', () => {
   reset()
-  const old = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
-  fakeRun(['a.jsp'], { upload: ago(100), verified: true })
+  const old = fakeRun(['a.jsp'], { upload: agoNow(200), verified: true })
+  fakeRun(['a.jsp'], { upload: agoNow(100), verified: true })
   const bare = cli('prune', '--target', 'fx', '--yes')
   assert.notEqual(bare.code, 0, bare.out)
   assert.match(bare.out, /다시 목록/)
@@ -299,13 +302,13 @@ test('CLI: prune --yes 만으로는 지우지 않는다. 목록의 확인 코드
 
 test('CLI: 목록을 본 뒤 지울 run 이 바뀌면(새 run 이 90일을 채움) 옛 확인 코드로는 지우지 않는다', () => {
   reset()
-  const old = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
-  const mid = fakeRun(['a.jsp'], { upload: ago(50), verified: true })
-  fakeRun(['a.jsp'], { upload: ago(10), verified: true })
+  const old = fakeRun(['a.jsp'], { upload: agoNow(200), verified: true })
+  const mid = fakeRun(['a.jsp'], { upload: agoNow(50), verified: true })
+  fakeRun(['a.jsp'], { upload: agoNow(10), verified: true })
   const list = cli('prune', '--target', 'fx')
   assert.match(list.out, new RegExp(old.id))
   const code = /확인 코드: ([0-9a-f]{8})/.exec(list.out)?.[1] ?? ''
-  writeFileSync(mid.path('upload.started'), `x\n${Date.now() - 100 * DAY}\n`)
+  writeFileSync(mid.path('upload.started'), `x\n${agoNow(100)}\n`)
   const stale = cli('prune', '--target', 'fx', '--plan', code, '--yes')
   assert.notEqual(stale.code, 0, stale.out)
   assert.match(stale.out, /다시 목록/)
