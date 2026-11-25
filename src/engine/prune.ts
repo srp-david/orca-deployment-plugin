@@ -4,7 +4,7 @@ import { existsSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { acquireLock, listRuns, openRun, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
 import type { Target } from './target.ts'
-import { dateTime } from './util.ts'
+import { dateTime, sha256, Stop } from './util.ts'
 
 export const BACKUP_DAYS = 90
 const DAY = 24 * 60 * 60 * 1000
@@ -21,6 +21,8 @@ export type PrunePlan = {
   keptLatest: string[]
   /** 90일이 지났지만 다른 이유로 남기는 것과 그 이유(예: 업로드한 run 인데 plan.tsv 가 깨짐). */
   keptOther: KeptRun[]
+  /** 이 목록의 확인 코드(pruneCode). CLI 는 이 코드를 받아야 지운다. */
+  code: string
 }
 export type KeptRun = { id: string; reason: string }
 
@@ -51,6 +53,11 @@ function ageAt(run: Run): number | null {
   if (up !== null) return up
   if (run.has('backup.done')) return parseDateTime(run.text('backup.done')) ?? statSync(run.path('backup.done')).mtimeMs
   return run.createdAt()
+}
+
+/** 백업 정리의 확인 코드 = sha256(대상 이름 + "\n" + 지울 run 이름을 정렬해 "\n" 으로 이은 것) 앞 8자리. */
+export function pruneCode(targetId: string, ids: string[]): string {
+  return sha256(`${targetId}\n${[...ids].sort().join('\n')}`).slice(0, 8)
 }
 
 // 같은 대상이라도 run 을 만들 때의 서버(호스트·포트)가 다르면 다른 파일이다.
@@ -114,20 +121,32 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
     items.push({ id: run.id, status, statusLabel: STATUS_LABEL[status], subject, at, bytes: DIRS.reduce((n, d) => n + sizeOf(run.path(d)), 0) })
   }
   items.sort((a, b) => a.at - b.at)
-  return { days: BACKUP_DAYS, items, bytes: items.reduce((n, x) => n + x.bytes, 0), keptLatest, keptOther }
+  const code = pruneCode(t.id, items.map((x) => x.id))
+  return { days: BACKUP_DAYS, items, bytes: items.reduce((n, x) => n + x.bytes, 0), keptLatest, keptOther, code }
 }
 
 /**
- * 백업을 지운다. ids 를 주면 그중 지금도 지울 수 있는 것만(사람이 본 목록보다 더 지우지 않게) 지운다.
+ * 백업을 지운다. 사람이 본 목록보다 더 지우지 않게, 무엇을 지울지는 둘 중 하나로만 받는다:
+ * - run 이름들(패널): 그중 지금도 지울 수 있는 것만 지운다.
+ * - 확인 코드(CLI): 지금 지울 목록의 코드와 같을 때만 그 목록 전부를 지운다. 다르면 아무것도 지우지 않고 멈춘다.
  * 대상 잠금 안에서 다시 판단한다: 그 사이 업로드·되돌리기가 끼지 않게.
  */
-export function pruneBackups(t: Target, ids: string[] | null, by = 'cli', now = Date.now()): { pruned: PruneItem[]; skipped: string[] } {
+export function pruneBackups(t: Target, pick: string[] | { code: string }, by = 'cli', now = Date.now()): { pruned: PruneItem[]; skipped: string[] } {
   const release = acquireLock({ target: t.id, run: '-', step: 'prune', by })
   try {
     const plan = prunePlan(t, now)
-    const want = ids ? new Set(ids) : null
-    const pruned = plan.items.filter((x) => !want || want.has(x.id))
-    const skipped = ids ? ids.filter((id) => !pruned.some((x) => x.id === id)) : []
+    let pruned: PruneItem[]
+    let skipped: string[] = []
+    if (Array.isArray(pick)) {
+      const want = new Set(pick)
+      pruned = plan.items.filter((x) => want.has(x.id))
+      skipped = pick.filter((id) => !pruned.some((x) => x.id === id))
+    } else {
+      // 지금 코드를 알려 주지 않는다: 목록을 다시 보고 그 코드를 쓰게.
+      if (pick.code !== plan.code)
+        throw new Stop(`확인 코드가 지금 지울 목록과 다름(그 사이 지울 run 이 바뀌었을 수 있음) — 아무것도 지우지 않음. 다시 목록을 보세요(prune --target ${t.id})`)
+      pruned = plan.items
+    }
     for (const item of pruned) {
       const run = openRun(item.id)
       // 표시를 먼저 남긴다: 지우다 끊겨도 반쯤 남은 백업으로 되돌리거나 올리지 않게.

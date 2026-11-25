@@ -67,6 +67,8 @@ run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 �
 
 확인 코드 = `sha256(대상 이름 + "\n" + plan.tsv)` 의 앞 8자리. run 폴더 형식과 확인 코드는 예전 bash 도구와 같아서, 그때 만든 run 도 읽고 되돌릴 수 있습니다(ADR 0001).
 
+백업 정리의 확인 코드 = `sha256(대상 이름 + "\n" + 지울 run 이름을 정렬해 "\n" 으로 이은 것)` 의 앞 8자리(`pruneCode`, `src/engine/prune.ts`). `prune --target <대상>` 이 목록과 함께 보여 주고, `prune --target <대상> --plan <코드> --yes` 는 대상 잠금 안에서 다시 판단한 지금 목록의 코드와 같을 때만 지웁니다. 다르면(그 사이 다른 run 이 90일을 채움 등) 아무것도 지우지 않고 멈춥니다. 패널은 코드 대신 사람이 본 run 이름들을 보내고, 워커는 그중 지금도 지울 수 있는 것만 지웁니다.
+
 ## 그림
 
 `docs/diagrams/*.html` 이 원본(SVG 를 담은 HTML)이고, 문서에는 같은 폴더의 PNG 를 넣습니다. 그림을 고친 뒤 diagram-design 플러그인의 `scripts/export_png.py <html> <png> 2` 로 PNG 를 다시 만듭니다.

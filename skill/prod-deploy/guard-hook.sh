@@ -10,6 +10,6 @@ input=$(cat)
 cmd='([^"\\]|\\.)*([[:space:]]|\\")'
 end='([[:space:]]|\\|"|$)'
 if printf '%s' "$input" | grep -Eq "(cli\.ts${cmd}(upload|rollback|unlock|creds)|cli\.ts${cmd}prune${cmd}--yes|deploy\.sh${cmd}(upload|rollback))${end}"; then
-  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"운영 반영 CLI(prod-deploy upload/rollback/unlock/creds/prune --yes). 대화에서 보여 준 반영 목록·대상·확인 코드(백업 정리는 지울 run 목록)와 같은지 보고 승인하세요."}}'
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"운영 반영 CLI(prod-deploy upload/rollback/unlock/creds/prune --yes). 대화에서 보여 준 반영 목록·대상·확인 코드(백업 정리는 지울 run 목록과 그 확인 코드)와 같은지 보고 승인하세요."}}'
 fi
 exit 0

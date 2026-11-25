@@ -90,6 +90,9 @@ function cli(...args: string[]): { code: number; out: string } {
   return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') }
 }
 
+/** 지금 목록의 확인 코드로 지운다(CLI 가 목록을 보고 --plan 을 주는 것과 같다). */
+const pruneAll = () => pruneBackups(fx, { code: prunePlan(fx, NOW).code }, 'test', NOW)
+
 test('90일 지난 run 은 지우고, 90일 안 된 run 은 남긴다', () => {
   reset()
   const old = fakeRun(['a.jsp'], { upload: ago(120), verified: true })
@@ -105,7 +108,7 @@ test('지우면 backup/ 만 없어지고 기록·상태는 남으며, 표시와 
   reset()
   const old = fakeRun(['a.jsp'], { upload: ago(120), verified: true })
   fakeRun(['a.jsp'], { upload: ago(10), verified: true })
-  const r = pruneBackups(fx, null, 'test', NOW)
+  const r = pruneAll()
   assert.deepEqual(r.pruned.map((x) => x.id), [old.id])
   const run = openRun(old.id)
   assert.equal(existsSync(run.path('backup')), false)
@@ -155,7 +158,7 @@ test('첫 파일에서 실패한(0/1) 부분 업로드 run 은 앞 run 의 보�
   const p = prunePlan(fx, NOW)
   assert.deepEqual(p.items.map((x) => x.id), [], '운영의 a.jsp 는 아직 a 가 올린 것')
   assert.deepEqual(p.keptLatest, [a.id])
-  pruneBackups(fx, null, 'test', NOW)
+  pruneAll()
   assert.ok(openRun(a.id).has('backup'), '부분 업로드 run 과 그 직전 성공 백업은 함께 남는다')
   assert.ok(openRun(b.id).has('backup'))
 })
@@ -207,7 +210,7 @@ test('다른 작업이 대상을 잠그고 있으면 지우지 않는다', () =>
   fakeRun(['a.jsp'], { upload: ago(10), verified: true })
   const release = acquireLock({ target: 'fx', run: 'x', step: 'upload', by: 't' })
   try {
-    assert.throws(() => pruneBackups(fx, null, 'test', NOW), /다른 작업 중/)
+    assert.throws(() => pruneAll(), /다른 작업 중/)
   } finally {
     release()
   }
@@ -219,7 +222,7 @@ test('백업을 지운 run 은 되돌리기·업로드·다시 백업을 하지 
   const done = fakeRun(['a.jsp'], { upload: ago(300), verified: true })
   fakeRun(['a.jsp'], { upload: ago(10), verified: true })
   const ready = fakeRun(['b.jsp'], { backupAt: ago(100) })
-  pruneBackups(fx, null, 'test', NOW)
+  pruneAll()
   await assert.rejects(rollback(done.id, done.code(), true), /백업 지움.*되돌릴 수 없음/)
   await assert.rejects(upload(ready.id, ready.code(), true), /백업 지움.*올리지 않음/)
   await assert.rejects(backup(ready.id), /백업 지움.*다시 백업하지 않음/)
@@ -239,7 +242,7 @@ test('업로드한 run 의 plan.tsv 가 없거나, 비었거나, 줄이 깨졌�
   assert.deepEqual(p.items.map((x) => x.id), [])
   const why = new Map(p.keptOther.map((x) => [x.id, x.reason]))
   for (const r of [missing, empty, broken, noRemote]) assert.match(why.get(r.id) ?? '', /plan\.tsv/, r.id)
-  pruneBackups(fx, null, 'test', NOW)
+  pruneAll()
   for (const r of [missing, empty, broken, noRemote]) assert.ok(openRun(r.id).has('backup'), r.id)
 })
 

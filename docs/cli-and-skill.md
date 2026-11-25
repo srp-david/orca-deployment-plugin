@@ -14,8 +14,8 @@ node src/cli.ts verify <run>                              # 대조만 다시
 node src/cli.ts rollback <run> --plan <확인 코드> --yes
 node src/cli.ts runs   --target myapp                     # 지난 run
 node src/cli.ts show   <run>                              # run 내용(반영 목록·문제·확인 코드)
-node src/cli.ts prune  --target myapp                     # 백업 정리: 90일 지난 run 의 백업 목록만
-node src/cli.ts prune  --target myapp --yes               # 그 백업을 지움(run 기록은 남김, 되살릴 수 없음)
+node src/cli.ts prune  --target myapp                     # 백업 정리: 90일 지난 run 의 백업 목록과 확인 코드만
+node src/cli.ts prune  --target myapp --plan <확인 코드> --yes  # 그 목록의 백업을 지움(run 기록은 남김, 되살릴 수 없음. 목록이 바뀌었으면 안 지움)
 node src/cli.ts unlock myapp                              # 끝난 작업이 남긴 잠금 풀기
 node src/cli.ts creds  myapp status|set|delete            # 접속 정보
 ```

@@ -12,7 +12,8 @@
 //   rollback <run> --plan <코드> --yes         백업을 되올리고 새로 만든 파일은 지움
 //   runs   [--target <대상>]                   지난 run 목록
 //   show   <run>                              run 내용(반영 목록·문제·확인 코드)
-//   prune  [--target <대상>] [--yes]           백업 정리: 90일 지난 run 의 백업 파일 목록(--yes 면 지움. 기록은 남김, ADR 0006)
+//   prune  [--target <대상>]                   백업 정리: 90일 지난 run 의 백업 파일 목록과 확인 코드(읽기만, ADR 0006)
+//   prune  [--target <대상>] --plan <코드> --yes  그 목록의 백업을 지움(기록은 남김). 목록이 바뀌었으면 지우지 않음
 //   unlock <대상>                             끝난 작업이 남긴 잠금 풀기(살아 있는 작업의 잠금은 안 풂)
 //   creds  <대상> status|delete                FTP 접속 정보(자격 증명 관리자 prod-deploy:<대상>)
 //   creds  <대상> set                          stdin 첫 줄 사용자, 둘째 줄 비밀번호
@@ -228,11 +229,17 @@ async function main(): Promise<number> {
           for (const x of p.items) say(`${x.id}\t${STATUS_LABEL[x.status]}\t${kb(x.bytes)}\t${x.subject}`)
           if (p.keptLatest.length) say(`남김(어느 운영 파일을 마지막으로 올린 run): ${p.keptLatest.join(', ')}`)
           for (const x of p.keptOther) say(`남김: ${x.id} — ${x.reason}`)
-          if (p.items.length) say('지우려면 --yes (run 기록은 남고, 지운 run 은 되돌릴 수 없음)')
+          if (p.items.length) {
+            say(`확인 코드: ${p.code}`)
+            say(`지우려면 prune --target ${t.id} --plan ${p.code} --yes (run 기록은 남고, 지운 run 은 되돌릴 수 없음)`)
+          }
         }
         return 0
       }
-      const r = pruneBackups(t, null, by)
+      // 사람이 본 목록에 묶는다: 목록의 확인 코드가 없으면, 또는 잠금 안에서 다시 판단한 목록의 코드와 다르면 지우지 않는다.
+      const code = flag(a, 'plan')
+      if (!code) throw new Stop(`확인 코드가 없음 — 아무것도 지우지 않음. 다시 목록을 보고(prune --target ${t.id}) 거기 나온 --plan <코드> 를 붙이세요`)
+      const r = pruneBackups(t, { code }, by)
       if (json) say(JSON.stringify(r))
       else {
         for (const x of r.pruned) say(`지움: ${x.id}\t${kb(x.bytes)}`)
