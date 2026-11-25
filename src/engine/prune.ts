@@ -161,28 +161,30 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
     const keepUnfinished = (why: string) =>
       keptOther.push({ id: run.id, reason: `지우다 멈춘 run — ${why}, 백업이 일부 지워졌을 수 있음` })
     const status = run.status()
+    const at = ageAt(run)
+    const old = at !== null && now - at >= BACKUP_DAYS * DAY
+    const up = run.uploadAt()
+    // 업로드 흔적이 있는데 plan.tsv 를 믿을 수 없으면 무엇을 올렸는지 모른다: 이 백업이 어느 파일의 유일한 이전본인지 판단할
+    // 수 없어 남긴다. 부분 업로드·시각 불명으로 빠지기 전에 보아 이유를 보인다(90일 안 된 것은 원래 남으니 뺀다).
+    const broken = up !== null && (at === null || old) ? run.planProblem() : null
+    if (broken) {
+      const why = `업로드한 run 인데 ${broken} — 올린 파일을 알 수 없어 남김`
+      if (unfinished) keepUnfinished(why)
+      else keptOther.push({ id: run.id, reason: why })
+      continue
+    }
     if (status === 'partial') {
       if (unfinished) keepUnfinished('부분 업로드 run 이라 남김')
       continue
     }
-    const at = ageAt(run)
-    if (at === null || now - at < BACKUP_DAYS * DAY) {
+    if (at === null || !old) {
       if (unfinished) keepUnfinished(at === null ? '업로드 시각을 몰라 남김' : `${BACKUP_DAYS}일이 지나지 않아 남김`)
       continue
     }
-    // 저장 위치부터 본다: 링크·정션 너머의 run 은 그 기록도 믿지 않고, 지우지 않는다.
+    // 저장 위치를 본다: 링크·정션 너머의 run 은 그 기록도 믿지 않고, 지우지 않는다.
     const unsafe = deleteProblem(run)
     if (unsafe) {
       keptOther.push({ id: run.id, reason: `${unsafe} — 링크를 따라 지우지 않으려고 남김` })
-      continue
-    }
-    const up = run.uploadAt()
-    const broken = up !== null ? run.planProblem() : null
-    if (broken) {
-      // 업로드한 run 인데 무엇을 올렸는지 알 수 없다: 이 백업이 어느 파일의 유일한 이전본인지 판단할 수 없어 남긴다.
-      const why = `업로드한 run 인데 ${broken} — 올린 파일을 알 수 없어 남김`
-      if (unfinished) keepUnfinished(why)
-      else keptOther.push({ id: run.id, reason: why })
       continue
     }
     if (status !== 'rolledBack' && typeof up === 'number') {
