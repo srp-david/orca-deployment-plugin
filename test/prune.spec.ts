@@ -74,6 +74,13 @@ function fakeRun(files: string[], o: Fake = {}) {
   if (o.done !== false && typeof o.upload === 'number') writeFileSync(`${dir}/upload.done`, 'x\n')
   if (o.verified) writeFileSync(`${dir}/verify.done`, 'x\n')
   if (o.rolledBack) writeFileSync(`${dir}/rollback.done`, 'x\n')
+  if (o.uploadedRows !== undefined) {
+    // 제품(steps.ts upload)이 남기는 것과 같은 줄: 시작, 올린 줄마다 [n/총] <운영 경로>, 다음 줄에서 멈춤.
+    let log = `10:00:00 업로드 시작: ${t.label} ${files.length}개 (코드 x)\n`
+    for (let i = 0; i < o.uploadedRows; i++) log += `10:00:01 [${i + 1}/${files.length}] /app/${files[i]}\n`
+    log += `10:00:02 멈춤: 업로드 실패: /app/${files[o.uploadedRows]} (지금까지 ${o.uploadedRows}개 → 되돌리기)\n`
+    writeFileSync(`${dir}/deploy.log`, log, { flag: 'a' })
+  }
   return openRun(id)
 }
 
@@ -155,6 +162,7 @@ test('첫 파일에서 실패한(0/1) 부분 업로드 run 은 앞 run 의 보�
   const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
   const b = fakeRun(['a.jsp'], { upload: ago(150), done: false, uploadedRows: 0 })
   assert.equal(b.status(), 'partial')
+  assert.equal(b.uploadedCount(), 0)
   const p = prunePlan(fx, NOW)
   assert.deepEqual(p.items.map((x) => x.id), [], '운영의 a.jsp 는 아직 a 가 올린 것')
   assert.deepEqual(p.keptLatest, [a.id])
@@ -167,7 +175,9 @@ test('일부만 올린(1/2) 부분 업로드 run 도 앞 run 의 보호를 풀�
   reset()
   const a = fakeRun(['b.jsp'], { upload: ago(200), verified: true })
   const a2 = fakeRun(['a.jsp'], { upload: ago(190), verified: true })
-  fakeRun(['a.jsp', 'b.jsp'], { upload: ago(150), done: false, uploadedRows: 1 })
+  const b = fakeRun(['a.jsp', 'b.jsp'], { upload: ago(150), done: false, uploadedRows: 1 })
+  assert.equal(b.status(), 'partial')
+  assert.equal(b.uploadedCount(), 1, 'a.jsp 한 줄은 다 올렸다')
   assert.deepEqual(ids(), [])
   assert.deepEqual(prunePlan(fx, NOW).keptLatest.sort(), [a.id, a2.id].sort())
 })
