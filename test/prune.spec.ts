@@ -177,13 +177,15 @@ test('올리지 않은 run 은 백업을 받은 시각으로 잰다', () => {
   assert.deepEqual(ids(), [old.id])
 })
 
-test('같은 서버를 쓰는 다른 대상이 나중에 올린 파일도 본다. 다른 서버는 보지 않는다', () => {
+test('다른 대상의 run 은 같은 호스트·포트·경로라도 이 대상 run 의 보호를 풀지 않는다', () => {
   reset()
   const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
   fakeRun(['a.jsp'], { target: other, upload: ago(100), verified: true })
   assert.deepEqual(ids(), [], '다른 서버의 같은 경로는 다른 파일')
+  // FTP 계정마다 루트(chroot)가 다를 수 있다: 같은 호스트·포트·경로라도 다른 대상이면 다른 파일일 수 있다.
   fakeRun(['a.jsp'], { target: fy, upload: ago(100), verified: true })
-  assert.deepEqual(ids(), [a.id])
+  assert.deepEqual(ids(), [])
+  assert.deepEqual(prunePlan(fx, NOW).keptLatest, [a.id])
   assert.deepEqual(ids(fy), [], 'fy 의 run 은 fy 를 정리할 때만, 그리고 마지막 run 이라 남김')
 })
 
