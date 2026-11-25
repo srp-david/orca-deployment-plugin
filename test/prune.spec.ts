@@ -411,3 +411,26 @@ test('한 run 의 백업 삭제가 실패해도 나머지는 지우고, 실패�
   assert.ok(openRun(stuck.id).backupPruned())
   assert.deepEqual(ids(), [], '다 지운 뒤에는 다시 나오지 않음')
 })
+
+test('지우다 멈춘 run 도 다음 정리에서 지금의 보존 규칙을 거친다: 지금 마지막 run 이 되면 남기고 이유를 보인다', async () => {
+  reset()
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  const b = fakeRun(['a.jsp'], { upload: ago(100), verified: true })
+  assert.deepEqual(ids(), [a.id], 'b 가 나중에 올려 a 는 지울 수 있다')
+  // a 의 첫 삭제에서 아무것도 지우기 전에 실패한다
+  const r = pruneBackups(fx, { code: prunePlan(fx, NOW).code }, 'test', NOW, (p) => {
+    throw Object.assign(new Error(`EBUSY: resource busy or locked, rmdir '${p}'`), { code: 'EBUSY' })
+  })
+  assert.deepEqual(r.failed.map((x) => x.id), [a.id])
+  assert.ok(existsSync(a.path('backup/files/a.jsp')), '백업은 온전히 남아 있다')
+  // 그 뒤 b 를 되돌렸다: 운영의 a.jsp 는 다시 a 가 올린 것
+  writeFileSync(b.path('rollback.done'), 'x\n')
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [b.id], 'a 는 지울 목록에 없다(되돌린 b 는 그대로 지울 수 있음)')
+  assert.match(p.keptOther.find((x) => x.id === a.id)?.reason ?? '', /지우다 멈춘 run.*마지막/)
+  pruneAll()
+  assert.ok(existsSync(a.path('backup/files/a.jsp')), '지금 마지막 백업은 지우지 않는다')
+  const run = openRun(a.id)
+  assert.ok(run.backupPruned(), '남은 백업이 온전한지 모르므로 되돌리기·업로드는 계속 막는다')
+  await assert.rejects(rollback(run.id, run.code(), true), /백업 지움/)
+})
