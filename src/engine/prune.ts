@@ -19,7 +19,10 @@ export type PrunePlan = {
   bytes: number
   /** 90일이 지났지만 어느 운영 파일을 마지막으로 올린 run 이라 남기는 것. */
   keptLatest: string[]
+  /** 90일이 지났지만 다른 이유로 남기는 것과 그 이유(예: 업로드한 run 인데 plan.tsv 가 깨짐). */
+  keptOther: KeptRun[]
 }
+export type KeptRun = { id: string; reason: string }
 
 function sizeOf(path: string): number {
   if (!existsSync(path)) return 0
@@ -77,6 +80,8 @@ function latestUploads(runs: Run[]): Map<string, number> {
   for (const r of runs) {
     const s = r.status()
     if (s !== 'uploaded' && s !== 'verified') continue
+    // plan.tsv 를 믿을 수 없으면 무엇을 올렸는지 모른다: 나중 업로드로 세지 않는다(앞 run 이 남는 쪽).
+    if (r.planProblem()) continue
     const at = r.uploadAt()
     if (typeof at !== 'number') continue
     for (const row of r.plan()) {
@@ -93,6 +98,7 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
   const latest = latestUploads(everyone)
   const items: PruneItem[] = []
   const keptLatest: string[] = []
+  const keptOther: KeptRun[] = []
   for (const run of everyone) {
     if (run.target.id !== t.id) continue
     if (run.backupPruned() || !hasBackup(run)) continue
@@ -101,6 +107,12 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
     const at = ageAt(run)
     if (at === null || now - at < BACKUP_DAYS * DAY) continue
     const up = run.uploadAt()
+    const broken = up !== null ? run.planProblem() : null
+    if (broken) {
+      // 업로드한 run 인데 무엇을 올렸는지 알 수 없다: 이 백업이 어느 파일의 유일한 이전본인지 판단할 수 없어 남긴다.
+      keptOther.push({ id: run.id, reason: `업로드한 run 인데 ${broken} — 올린 파일을 알 수 없어 남김` })
+      continue
+    }
     if (status !== 'rolledBack' && typeof up === 'number') {
       // 그 파일을 이 run 보다 나중에 올린 run 이 없으면, 이 백업이 그 변경 전 운영본의 유일한 사본일 수 있다.
       if (run.plan().some((row) => (latest.get(fileKey(run, row.remote)) ?? up) <= up)) {
@@ -112,7 +124,7 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
     items.push({ id: run.id, status, statusLabel: STATUS_LABEL[status], subject, at, bytes: DIRS.reduce((n, d) => n + sizeOf(run.path(d)), 0) })
   }
   items.sort((a, b) => a.at - b.at)
-  return { days: BACKUP_DAYS, items, bytes: items.reduce((n, x) => n + x.bytes, 0), keptLatest }
+  return { days: BACKUP_DAYS, items, bytes: items.reduce((n, x) => n + x.bytes, 0), keptLatest, keptOther }
 }
 
 /**

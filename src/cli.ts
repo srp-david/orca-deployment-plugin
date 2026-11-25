@@ -227,6 +227,7 @@ async function main(): Promise<number> {
           say(`백업 정리 — ${t.label}: ${p.days}일 지난 run ${p.items.length}개, ${kb(p.bytes)}`)
           for (const x of p.items) say(`${x.id}\t${STATUS_LABEL[x.status]}\t${kb(x.bytes)}\t${x.subject}`)
           if (p.keptLatest.length) say(`남김(어느 운영 파일을 마지막으로 올린 run): ${p.keptLatest.join(', ')}`)
+          for (const x of p.keptOther) say(`남김: ${x.id} — ${x.reason}`)
           if (p.items.length) say('지우려면 --yes (run 기록은 남고, 지운 run 은 되돌릴 수 없음)')
         }
         return 0

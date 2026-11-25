@@ -213,6 +213,9 @@ async function loadRuns(): Promise<void> {
   }
 }
 
+/** 90일이 지났지만 다른 이유로 남기는 run 과 그 이유(예전 워커는 칸이 없다). */
+const keptOtherOf = (p: PrunePlan): PrunePlan['keptOther'] => p.keptOther ?? []
+
 const size = (bytes: number): string =>
   bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)}MB` : `${Math.ceil(bytes / 1024)}KB`
 
@@ -226,7 +229,12 @@ async function offerPrune(): Promise<void> {
   set(prunable, p)
   if (!p.items.length) {
     set(pruneOffer, null)
-    set(runsNotice, `${p.days}일 지난 백업 중 지울 것이 없음${p.keptLatest.length ? ` · 운영 파일을 마지막으로 올린 run ${p.keptLatest.length}개는 남김` : ''}`)
+    const other = keptOtherOf(p)
+    set(
+      runsNotice,
+      `${p.days}일 지난 백업 중 지울 것이 없음${p.keptLatest.length ? ` · 운영 파일을 마지막으로 올린 run ${p.keptLatest.length}개는 남김` : ''}` +
+        other.map((x) => ` · 남김: ${x.id} — ${x.reason}`).join('')
+    )
     return
   }
   set(runsNotice, null)
@@ -1255,7 +1263,7 @@ function RunsTab() {
             icon="delete"
             variant="ghost"
             size="sm"
-            disabled={canPrune ? canPrune.items.length === 0 : false}
+            disabled={canPrune ? canPrune.items.length === 0 && keptOtherOf(canPrune).length === 0 : false}
             onPress={offerPrune}
           >
             {`${canPrune?.days ?? 90}일 지난 백업 정리`}
@@ -1291,6 +1299,11 @@ function RunsTab() {
                 {`… 외 ${offer.items.length - 10}개`}
               </Text>
             )}
+            {keptOtherOf(offer).map((x) => (
+              <Text key={`kept-${x.id}`} size="xs">
+                {`남김: ${x.id} — ${x.reason}`}
+              </Text>
+            ))}
             <Row gap="xs">
               <Button icon="delete" tone="danger" size="sm" onPress={confirmPrune}>
                 {`run ${offer.items.length}개 백업 지우기`}

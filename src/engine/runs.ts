@@ -97,6 +97,23 @@ export class Run {
       })
   }
 
+  /**
+   * plan.tsv 를 믿을 수 없으면 그 이유(없음·빔·깨진 줄), 멀쩡하면 null. 줄마다 종류(M/A)·로컬·운영 경로·sha 두 칸이
+   * 있어야 한다. 백업 정리가 업로드한 run 의 백업을 지워도 되는지 볼 때 쓴다(어느 운영 파일을 올렸는지 알아야 하므로).
+   */
+  planProblem(): string | null {
+    if (!this.has('plan.tsv')) return 'plan.tsv 없음'
+    const lines = this.text('plan.tsv')
+      .split('\n')
+      .filter((l) => l !== '')
+    if (!lines.length) return 'plan.tsv 가 빔'
+    const bad = lines.findIndex((l) => {
+      const c = l.split('\t')
+      return c.length < 5 || (c[0] !== 'M' && c[0] !== 'A') || c.slice(1, 5).some((x) => x.trim() === '')
+    })
+    return bad < 0 ? null : `plan.tsv ${bad + 1}째 줄이 깨짐`
+  }
+
   list(name: 'manual.tsv' | 'skip.tsv' | 'notes.tsv'): ListRow[] {
     return this.text(name)
       .split('\n')
