@@ -67,15 +67,19 @@ const ftpText = (p: string) => (existsSync(ftpFile(p)) ? readFileSync(ftpFile(p)
 
 // 계정 바꾸기 시나리오(대상 fa): 같은 호스트·포트에 FTP 계정 둘(fa-x, fa-y). 계정마다 홈(chroot)이 따로라 같은 운영 경로가
 // 다른 파일이다. 기존 단계의 시험 FTP 계정(test, ftpRoot)·run 기록 폴더(runs)와 겹치지 않는다.
-type Account = 'x' | 'y'
+// t·u 는 이름이 끝 공백 하나만 다른 두 계정이다(재검토 3).
+type Account = 'x' | 'y' | 't' | 'u'
+const ACCOUNT_NAMES: Record<Account, string> = { x: 'fa-x', y: 'fa-y', t: 'team', u: 'team ' }
+const faUser = (who: Account) => ACCOUNT_NAMES[who]
 const faHome = (who: Account) => `${tmp}/ftp-fa-${who}`
 const faFile = (who: Account, p: string) => join(faHome(who), 'site', p)
 const faText = (who: Account, p: string) => (existsSync(faFile(who, p)) ? readFileSync(faFile(who, p), 'utf8') : null)
 const faNetrc = `${tmp}/netrc-fa`
 /** 시험 계정의 비밀번호. 다른 곳에 나오지 않는 글자라, run 기록·로그·출력에 새어 나오지 않는지 찾을 수 있다. */
 const faPassword = (who: Account) => `pw-${who}-7c1e93d05b`
-/** netrc 에 그 계정 항목 한 줄. */
-const faEntry = (who: Account) => `machine 127.0.0.1 login fa-${who} password ${faPassword(who)}\n`
+/** netrc 에 그 계정 항목 한 줄(공백이 든 이름은 따옴표로). */
+const faEntry = (who: Account) =>
+  `machine 127.0.0.1 login ${/\s/.test(faUser(who)) ? `"${faUser(who)}"` : faUser(who)} password ${faPassword(who)}\n`
 /**
  * 대상 fa(와 같은 netrc 를 쓰는 대상들)가 접속할 계정을 바꾼다. 자격 증명 관리자에서 계정을 바꾸는 것처럼, 같은 자리(대상의
  * netrc 파일)에 다른 사용자를 적는다. 대상 설정은 그대로다. 맨 위 주석 줄은 손으로 쓴 netrc 에 흔한 모양이다.
@@ -162,10 +166,13 @@ async function main(): Promise<void> {
   // 서버 출력은 파일로 바로: 파이프로 받으면 spawnSync 동안 못 읽어 파이프가 차고 서버가 멈춘다.
   const logFile = `${tmp}/ftp-server.log`
   const fd = openSync(logFile, 'w')
-  const accounts = (['x', 'y'] as const).flatMap((who) => [`fa-${who}`, faPassword(who), faHome(who)])
-  const server = spawn(PY, ['-I', join(ROOT, 'test', 'ftp-server.py'), ftpRoot, String(PORT), 'test', 'test', ...accounts], {
-    stdio: ['ignore', fd, fd]
-  })
+  // 계정·비밀번호는 표준 입력으로 넘긴다(시험 서버의 프로세스 인자에도 비밀번호를 남기지 않게).
+  const accounts = [
+    { user: 'test', password: 'test', home: ftpRoot },
+    ...(Object.keys(ACCOUNT_NAMES) as Account[]).map((who) => ({ user: faUser(who), password: faPassword(who), home: faHome(who) }))
+  ]
+  const server = spawn(PY, ['-I', join(ROOT, 'test', 'ftp-server.py'), '--accounts-stdin', String(PORT)], { stdio: ['pipe', fd, fd] })
+  server.stdin.end(JSON.stringify(accounts))
   let exited: number | null = null
   server.on('exit', (c) => (exited = c ?? -1))
   for (let i = 0; ; i++) {
@@ -840,8 +847,8 @@ async function accountScenarios(): Promise<void> {
 
   // 재검토 2: netrc 는 엔진이 읽어 사용자 이름·비밀번호를 정하고, curl 에는 그 값을 넘긴다. 지문은 보낸 사용자 이름으로 만든다.
   const serverLog = () => readFileSync(`${tmp}/ftp-server.log`, 'utf8')
-  const logins = (who: Account) => serverLog().split(`USER 'fa-${who}' logged in.`).length - 1
-  const markFor = (who: Account) => createHash('sha256').update(`prod-deploy account\n127.0.0.1:${PORT}\nfa-${who}`).digest('hex').slice(0, 16)
+  const logins = (who: Account) => serverLog().split(`USER '${faUser(who)}' logged in.`).length - 1
+  const markFor = (who: Account) => createHash('sha256').update(`prod-deploy account\n127.0.0.1:${PORT}\n${faUser(who)}`).digest('hex').slice(0, 16)
   const markIn = (target: string, id: string) => readFileSync(`${tmp}/runs-${target}/${id}/upload.account`, 'utf8').trim()
   /** 대상 fa 와 같은 저장소·netrc 를 쓰고 운영 루트·run 기록 폴더만 다른 대상. 두 계정의 홈에 그 시점의 f 를 깔아 둔다. */
   function sideTarget(id: string, root: string, accounts: Account[]): void {
