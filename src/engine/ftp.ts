@@ -75,7 +75,8 @@ export class Ftp {
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
     // stderr 는 여기서 한 번만 가리고, 로그와 호출자(목록·접속 확인·멈춤 문구·패널)가 모두 가린 글자를 쓴다.
     const err = this.hideSecret(r.err)
-    if (r.code !== 0 && err.trim()) this.log(`curl: ${err.trim()}`)
+    // 종료 코드는 가린 글자와 따로 적는다: 짧은 비밀번호를 가리다 오류 글자 속 숫자가 지워져도 코드는 보이게.
+    if (r.code !== 0 && err.trim()) this.log(`curl 종료 ${r.code}: ${err.trim()}`)
     return { ok: r.code === 0, code: r.code, out: r.out, err }
   }
 
