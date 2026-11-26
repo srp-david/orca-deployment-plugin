@@ -65,16 +65,22 @@ export class Ftp {
   }
 
   private async curl(args: string[], seconds = 60): Promise<{ ok: boolean; code: number; out: Buffer; err: string }> {
-    const common = ['-sS', '--max-time', String(seconds)]
+    // -q 는 맨 앞이어야 한다: 사용자 curl 설정(.curlrc)을 읽지 않는다(설정의 verbose 등이 인증 대화를 출력에 섞지 않게).
+    const common = ['-q', '-sS', '--max-time', String(seconds)]
     const verbose = !!process.env.PRODDEPLOY_CURL_VERBOSE
     if (verbose) common.push('-v')
     if (this.t.connection.passive === false) common.push('--ftp-port', '-')
     common.push('-K', '-')
     const input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
-    if (r.code !== 0 && r.err.trim())
-      this.log(`curl: ${verbose ? r.err.replace(/^> PASS .*$/gm, '> PASS ***') : r.err.trim()}`)
+    if (r.code !== 0 && r.err.trim()) this.log(`curl: ${this.hideSecret(r.err).trim()}`)
     return { ok: r.code === 0, code: r.code, out: r.out, err: r.err }
+  }
+
+  /** 로그에 남기기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가리고, 비밀번호 값이 섞여 있으면 그것도 가린다. */
+  private hideSecret(s: string): string {
+    const masked = s.replace(/^> PASS [^\r\n]*/gm, '> PASS ***')
+    return this.auth.password ? masked.split(this.auth.password).join('***') : masked
   }
 
   /** 폴더 목록 한 번: 성공이면 이름들, 실패면 curl 종료 코드. 같은 실행 안에서는 다시 묻지 않는다. */
