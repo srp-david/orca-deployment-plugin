@@ -22,7 +22,13 @@ import { Stop } from './util.ts'
 
 export type NetrcLogin = { user: string; password: string }
 
-type Entry = { line: number; host: string | null; user?: string; password?: string }
+/**
+ * curl 에는 user = "이름:비밀번호" 로 넘기고 curl 은 첫 콜론에서 나눈다. 그래서 이름에 콜론이 있으면 의도한 계정으로 로그인하지
+ * 않고 지문도 보낸 이름과 달라진다: 자격 증명 관리자·netrc 어느 쪽이든 멈춘다(ftp.ts resolveAuth). 비밀번호의 콜론은 괜찮다.
+ */
+export const USER_COLON = '사용자 이름에 콜론이 있음(curl 이 첫 콜론에서 이름과 비밀번호를 나눠 다른 계정으로 로그인함)'
+
+type Entry = { line: number; host: string | null; user?: string; userLine?: number; password?: string }
 
 /** netrc 내용(바이트 또는 글자)에서 그 호스트의 login·password. 이상한 모양이면 Stop(줄 번호와 이유, 값은 없음). */
 export function parseNetrc(input: Buffer | string, host: string, name: string): NetrcLogin {
@@ -98,7 +104,10 @@ export function parseNetrc(input: Buffer | string, host: string, name: string): 
         continue
       }
       if (want === 'user' || want === 'password') {
-        if (want === 'user') entry!.user = tok
+        if (want === 'user') {
+          entry!.user = tok
+          entry!.userLine = n
+        }
         else entry!.password = tok
         want = 'key'
         continue
@@ -146,6 +155,7 @@ export function parseNetrc(input: Buffer | string, host: string, name: string): 
   if (!chosen) throw new Stop(`netrc 에 ${target} 항목이 없음(machine·default) (${where})`)
   if (!chosen.user) throw new Stop(`netrc 에 ${target} 의 login 이 없음(${chosen.line}행 항목) (${where})`)
   if (chosen.password === undefined) throw new Stop(`netrc 에 ${target} 의 password 가 없음(${chosen.line}행 항목) (${where})`)
+  if (chosen.user.includes(':')) fail(chosen.userLine!, USER_COLON)
   return { user: chosen.user, password: chosen.password }
 }
 

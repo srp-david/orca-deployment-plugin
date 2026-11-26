@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { readCredential } from './creds.ts'
-import { readNetrc } from './netrc.ts'
+import { readNetrc, USER_COLON } from './netrc.ts'
 import { netrcPath, type Target } from './target.ts'
 import { exec, sha256, Stop, toNative } from './util.ts'
 
@@ -15,7 +15,10 @@ export type FtpAuth = { kind: 'user'; user: string; password: string }
  */
 export async function resolveAuth(t: Target): Promise<FtpAuth> {
   const c = await readCredential(t.id)
-  if (c) return { kind: 'user', user: c.user, password: c.password }
+  if (c) {
+    if (c.user.includes(':')) throw new Stop(`자격 증명 관리자의 prod-deploy:${t.id} 를 쓸 수 없음 — ${USER_COLON}. 패널의 대상 설정에서 고치세요`)
+    return { kind: 'user', user: c.user, password: c.password }
+  }
   const netrc = netrcPath(t)
   if (netrc) {
     if (existsSync(toNative(netrc))) return { kind: 'user', ...readNetrc(toNative(netrc), t.connection.host, netrc) }
