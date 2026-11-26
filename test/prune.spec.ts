@@ -49,6 +49,8 @@ type Fake = {
   rolledBack?: boolean
   /** 부분 업로드에서 올린 줄 수(로그에 [n/총] 줄을 남김). 다음 줄에서 업로드 실패로 멈춘 것으로 친다. */
   uploadedRows?: number
+  /** 업로드한 계정의 지문(upload.account). 없으면 지문을 남기기 전의 기록. */
+  account?: string
 }
 
 let seq = 0
@@ -71,6 +73,7 @@ function fakeRun(files: string[], o: Fake = {}) {
   writeFileSync(`${dir}/backup.done`, `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}\n`)
   if (o.upload === 'bash') writeFileSync(`${dir}/deploy.log`, '10:00:00 업로드 시작: x\n10:00:01 [1/2] /app/a\n', { flag: 'a' })
   else if (o.upload) writeFileSync(`${dir}/upload.started`, `x\n${o.upload}\n`)
+  if (o.account) writeFileSync(`${dir}/upload.account`, `${o.account}\n`)
   if (o.done !== false && typeof o.upload === 'number') writeFileSync(`${dir}/upload.done`, 'x\n')
   if (o.verified) writeFileSync(`${dir}/verify.done`, 'x\n')
   if (o.rolledBack) writeFileSync(`${dir}/rollback.done`, 'x\n')
@@ -224,6 +227,38 @@ test('다른 대상의 run 은 같은 호스트·포트·경로라도 이 대상
   assert.deepEqual(ids(), [])
   assert.deepEqual(prunePlan(fx, NOW).keptLatest, [a.id])
   assert.deepEqual(ids(fy), [], 'fy 의 run 은 fy 를 정리할 때만, 그리고 마지막 run 이라 남김')
+})
+
+test('다른 계정(지문)의 나중 업로드는 이 run 의 보호를 풀지 않는다', () => {
+  reset()
+  // 같은 대상·같은 경로라도 계정마다 루트(chroot)가 다를 수 있다: 계정 X 의 a.jsp 는 아직 a 가 마지막으로 올린 것.
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true, account: '1111111111111111' })
+  const b = fakeRun(['a.jsp'], { upload: ago(100), verified: true, account: '2222222222222222' })
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [])
+  assert.deepEqual(p.keptLatest.sort(), [a.id, b.id].sort())
+})
+
+test('같은 계정(지문)의 나중 업로드는 지금처럼 보호를 푼다', () => {
+  reset()
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true, account: '1111111111111111' })
+  const b = fakeRun(['a.jsp'], { upload: ago(100), verified: true, account: '1111111111111111' })
+  const p = prunePlan(fx, NOW)
+  assert.deepEqual(p.items.map((x) => x.id), [a.id])
+  assert.deepEqual(p.keptLatest, [b.id])
+})
+
+test('지문이 없는 run(지문을 남기기 전 기록)은 어느 지문의 run 과도 같은 계정으로 본다(양쪽 방향)', () => {
+  reset()
+  const a = fakeRun(['a.jsp'], { upload: ago(200), verified: true })
+  const b = fakeRun(['a.jsp'], { upload: ago(100), verified: true, account: '2222222222222222' })
+  assert.deepEqual(ids(), [a.id], '지문 없는 앞 run 의 보호를 지문 있는 나중 run 이 푼다')
+  assert.deepEqual(prunePlan(fx, NOW).keptLatest, [b.id])
+  reset()
+  const c = fakeRun(['a.jsp'], { upload: ago(200), verified: true, account: '1111111111111111' })
+  const d = fakeRun(['a.jsp'], { upload: ago(100), verified: true })
+  assert.deepEqual(ids(), [c.id], '지문 있는 앞 run 의 보호를 지문 없는 나중 run 이 푼다')
+  assert.deepEqual(prunePlan(fx, NOW).keptLatest, [d.id])
 })
 
 test('ids 를 주면 그중 지금도 지울 수 있는 것만 지운다', () => {

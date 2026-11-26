@@ -13,7 +13,7 @@ process.env.PRODDEPLOY_HOME = `${tmp}/home`
 const { acquireLock, clearStaleLock, listRuns, newRun, openRun, readLock } = await import('../src/engine/runs.ts')
 const { configChanged, laterOverlaps, rollback } = await import('../src/engine/steps.ts')
 const { deleteTarget, saveTarget } = await import('../src/engine/target.ts')
-const { toMsys } = await import('../src/engine/util.ts')
+const { sha256, toMsys } = await import('../src/engine/util.ts')
 
 const target = {
   id: 'fx',
@@ -36,6 +36,8 @@ type Fake = {
   snapshot?: boolean
   dir?: string
   logOnly?: boolean
+  /** 업로드한 계정의 지문(upload.account). 없으면 지문을 남기기 전의 기록. */
+  account?: string
 }
 
 /** run 폴더를 손으로 만든다. upload: 새 형식 업로드 시작 ms, done: upload.done 내용(bash 형식 날짜) 또는 true. */
@@ -50,6 +52,7 @@ function fakeRun(id: string, files: string[], o: Fake = {}) {
   if (o.log) writeFileSync(`${dir}/deploy.log`, o.log)
   writeFileSync(`${dir}/backup.done`, 'x\n')
   if (o.upload) writeFileSync(`${dir}/upload.started`, `x\n${o.upload}\n`)
+  if (o.account) writeFileSync(`${dir}/upload.account`, `${o.account}\n`)
   if (o.done) writeFileSync(`${dir}/upload.done`, o.done === true ? '2026-11-06 12:00:00\n' : `${o.done}\n`)
   return openRun(id)
 }
@@ -236,6 +239,45 @@ test('같은 이름이라도 다른 서버의 run 은 나중 run 판정에 섞�
   writeFileSync(`${bDir}/upload.started`, 'x\n2000\n')
   writeFileSync(`${bDir}/upload.done`, '2026-11-06 20:00:02\n')
   assert.ok(!laterOverlaps(a).some((x) => x.run === 'fx-20261106-200001-aaaaaab2'))
+})
+
+test('다른 계정(지문)의 나중 run 은 되돌리기를 막지 않고, 같은 계정·지문 없는 run 은 지금처럼 막는다', () => {
+  const X = '1111111111111111'
+  const Y = '2222222222222222'
+  // 계정마다 루트(chroot)가 다를 수 있다: 다른 지문의 run 은 같은 경로라도 다른 파일을 건드렸다.
+  const a = fakeRun('fx-20261110-100000-acc00001', ['acc1.xml'], { upload: 1000, done: true, account: X })
+  const b = fakeRun('fx-20261110-100001-acc00002', ['acc1.xml'], { upload: 2000, done: true, account: Y })
+  assert.deepEqual(laterOverlaps(a).map((x) => x.run), [], `다른 계정의 ${b.id} 는 나중 run 이 아님`)
+  // 같은 지문
+  const c = fakeRun('fx-20261110-100002-acc00003', ['acc2.xml'], { upload: 1000, done: true, account: X })
+  const d = fakeRun('fx-20261110-100003-acc00004', ['acc2.xml'], { upload: 2000, done: true, account: X })
+  assert.deepEqual(laterOverlaps(c).map((x) => x.run), [d.id])
+  // 지문 없는 run 은 같은 계정으로 본다(양쪽 방향)
+  const e = fakeRun('fx-20261110-100004-acc00005', ['acc3.xml'], { upload: 1000, done: true })
+  const f = fakeRun('fx-20261110-100005-acc00006', ['acc3.xml'], { upload: 2000, done: true, account: Y })
+  assert.deepEqual(laterOverlaps(e).map((x) => x.run), [f.id])
+  const g = fakeRun('fx-20261110-100006-acc00007', ['acc4.xml'], { upload: 1000, done: true, account: X })
+  const h = fakeRun('fx-20261110-100007-acc00008', ['acc4.xml'], { upload: 2000, done: true })
+  assert.deepEqual(laterOverlaps(g).map((x) => x.run), [h.id])
+})
+
+test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀번호와 이름 그대로는 담지 않는다. netrc 는 대상 호스트의 login 만 읽는다', async () => {
+  const { accountMark } = await import('../src/engine/account.ts')
+  const t = { ...target, connection: { ...target.connection, host: 'FTP.Example.com', port: 2121 } }
+  const want = (user: string) => sha256(`prod-deploy account\nftp.example.com:2121\n${user}`).slice(0, 16)
+  const m = accountMark(t, { kind: 'user', user: 'alice', password: 'secret' })
+  assert.equal(m, want('alice'))
+  assert.match(m, /^[0-9a-f]{16}$/)
+  assert.equal(accountMark(t, { kind: 'user', user: 'alice', password: 'other' }), m, '비밀번호는 지문에 들지 않음')
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'bob', password: 'secret' }), m)
+  assert.notEqual(accountMark({ ...t, connection: { ...t.connection, port: 21 } }, { kind: 'user', user: 'alice', password: 'secret' }), m)
+  // netrc: 다른 호스트 항목은 건너뛰고, 여러 줄에 걸친 항목도 읽는다(호스트는 대소문자 무시)
+  const netrc = `${tmp}/acc.netrc`
+  writeFileSync(netrc, 'machine other.example login mallory password x\nmachine ftp.example.com\n  login alice\n  password secret\n')
+  assert.equal(accountMark(t, { kind: 'netrc', file: netrc }), want('alice'))
+  // 대상 호스트 항목이 없으면 netrc 경로로 대신한다
+  writeFileSync(netrc, 'machine other.example login mallory password x\n')
+  assert.equal(accountMark(t, { kind: 'netrc', file: netrc }), want(`netrc:${netrc}`))
 })
 
 test('작업 기록: 프로세스 번호가 다른 프로세스에 다시 쓰여도, beat 가 멈췄으면 끝난 작업으로 본다', async () => {

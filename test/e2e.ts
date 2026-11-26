@@ -4,7 +4,7 @@
 // 사용법: node test/e2e.ts            (pyftpdlib venv: ~/.prod-deploy/test-ftp/venv)
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -726,6 +726,18 @@ async function accountScenarios(): Promise<void> {
     const ago = (days: number) => `x\n${Date.now() - days * 24 * 60 * 60 * 1000}\n`
     writeFileSync(`${tmp}/runs-fa/${ra}/upload.started`, ago(101))
     writeFileSync(`${tmp}/runs-fa/${rb}/upload.started`, ago(100))
+  })
+
+  await step('업로드가 계정 지문(upload.account)을 남기고, 사용자 이름·비밀번호는 run 기록에 남기지 않음', () => {
+    const mark = (id: string) => readFileSync(`${tmp}/runs-fa/${id}/upload.account`, 'utf8').trim()
+    assert.match(mark(ra), /^[0-9a-f]{16}$/)
+    assert.match(mark(rb), /^[0-9a-f]{16}$/)
+    assert.notEqual(mark(ra), mark(rb), '계정이 다르면 지문이 다름')
+    // run 폴더의 어느 파일에도 계정 이름(비밀번호와 같은 값)이 그대로 들어가지 않는다.
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]))
+    for (const id of [ra, rb])
+      for (const f of files(`${tmp}/runs-fa/${id}`)) assert.doesNotMatch(readFileSync(f, 'utf8'), /fa-[xy]/, f)
   })
 
   await step('백업 정리: 다른 계정의 나중 업로드가 이 계정으로 올린 run 의 보호를 풀지 않음', () => {
