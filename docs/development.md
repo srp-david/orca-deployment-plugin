@@ -5,7 +5,7 @@
 ![운영 반영 구조: 패널이 워커에 요청하고, 워커와 Claude 스킬이 띄운 CLI 프로세스가 엔진으로 메인 체크아웃·운영 FTP·자격 증명 관리자를 다루며, 진행은 run·작업 기록으로 워커가 읽는다](diagrams/architecture.png)
 
 ```
-src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 작업 기록, class 파일 상수 읽기(classfile.ts), 대상 설정 공유 형식(share.ts), 저장소 구조로 설정 제안(suggest.ts)
+src/engine/          엔진(TS, 빌드 단계 없음) — 대상 설정, git, FTP(curl), 자격 증명, plan·백업·업로드·대조·되돌리기, run 기록, 백업 정리(prune.ts), 작업 기록, class 파일 상수 읽기(classfile.ts), 대상 설정 공유 형식(share.ts), 저장소 구조로 설정 제안(suggest.ts)
 src/cli.ts           CLI. 스킬과 워커가 같은 엔진을 이 명령으로 부름
 src/worker.ts        플러그인 워커. 짧은 일은 엔진을 직접, 운영 FTP 단계는 CLI 프로세스를 따로 띄움(ADR 0002)
 src/panel.tsx        패널(Orca components)
@@ -23,7 +23,7 @@ TypeScript 는 빌드하지 않습니다. Node 24 의 타입 제거로 바로 �
 ## 시험
 
 ```powershell
-node --test test/*.spec.ts   # 엔진 단위·안전 회귀·스킬 훅·패널 열기·설정 확인·접속 확인 판정
+node --test test/*.spec.ts   # 엔진 단위·안전 회귀·백업 정리·스킬 훅·패널 열기·설정 확인·접속 확인 판정
 orca plugin test .           # 패널·워커(mock host)
 orca plugin check .          # 패널을 워커와 함께 한 번 그리기
 node test/e2e.ts             # 임시 저장소 + 시험 FTP 로 CLI 전체 흐름
@@ -63,9 +63,11 @@ node test/seed-test-ftp.ts <커밋>     # 시험 FTP 루트를 그 커밋의 직
 | run 위치 색인 | `~/.prod-deploy/run-index/` (run 기록 폴더를 바꿔도 예전 run 을 찾음) |
 | 잠금·작업 진행 | `~/.prod-deploy/locks/`, `~/.prod-deploy/jobs/` |
 
-run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `warnings.txt`(경고), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김).
+run 폴더: `meta.env`(대상·기준·반영 커밋·HEAD), `plan.tsv`(반영 목록), `errors.txt`(문제), `warnings.txt`(경고), `manual.tsv`·`skip.tsv`·`notes.tsv`, `target.json`(그때의 설정), `pr.json`, `backup/`, `stage/`(업로드할 바이트 고정본, 업로드가 끝나면 지움), `deploy.log`, 단계별 표시(`plan.done`, `backup.done`, `upload.started`, `upload.done`, `verify.done`·`verify.failed`, `rollback.done`), `hidden`(run 기록 화면에서 숨김), `backup.pruned`(백업 정리로 `backup/` 을 지운 시각·크기, [ADR 0006](adr/0006-prune-old-backups-keep-records.md)), `backup.pruning`(백업 정리가 지우는 중. `backup.pruned` 없이 남아 있으면 지우다 멈춘 것(`backup.pruned` 가 있으면 다 지운 것으로 봄). 다음 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 마저 지우고, 마지막 run 이 되었으면 남김).
 
 확인 코드 = `sha256(대상 이름 + "\n" + plan.tsv)` 의 앞 8자리. run 폴더 형식과 확인 코드는 예전 bash 도구와 같아서, 그때 만든 run 도 읽고 되돌릴 수 있습니다(ADR 0001).
+
+백업 정리의 확인 코드 = `sha256(대상 이름 + "\n" + 지울 run 이름을 정렬해 "\n" 으로 이은 것)` 의 앞 8자리(`pruneCode`, `src/engine/prune.ts`). `prune --target <대상>` 이 목록과 함께 보여 주고, `prune --target <대상> --plan <코드> --yes` 는 대상 잠금 안에서 다시 판단한 지금 목록의 코드와 같을 때만 지웁니다. 다르면(그 사이 다른 run 이 90일을 채움 등) 아무것도 지우지 않고 멈춥니다. 패널은 코드 대신 사람이 본 run 이름들을 보내고, 워커는 그중 지금도 지울 수 있는 것만 지웁니다.
 
 ## 그림
 

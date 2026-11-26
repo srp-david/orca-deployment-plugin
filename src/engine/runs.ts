@@ -1,14 +1,18 @@
 // run 기록. 폴더 형식은 bash deploy.sh 와 같다(meta.env, plan.tsv, targets.tsv, manual.tsv, skip.tsv,
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
-// pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
+// pr.json, notes.tsv, plan.done, upload.started, upload.account(업로드한 FTP 계정의 지문, account.ts),
+// verify.done/verify.failed, rollback.done,
 // backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김),
-// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다).
+// warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다), backup.pruned(백업 정리로 backup/ 을 지움, ADR 0006),
+// backup.pruning(백업 정리가 지우는 중. 끝나면 backup.pruned 로 바뀐다. 남아 있으면 지우다 멈춘 것).
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync
@@ -97,6 +101,23 @@ export class Run {
       })
   }
 
+  /**
+   * plan.tsv 를 믿을 수 없으면 그 이유(없음·빔·깨진 줄), 멀쩡하면 null. 줄마다 종류(M/A)·로컬·운영 경로·sha 두 칸이
+   * 있어야 한다. 백업 정리가 업로드한 run 의 백업을 지워도 되는지 볼 때 쓴다(어느 운영 파일을 올렸는지 알아야 하므로).
+   */
+  planProblem(): string | null {
+    if (!this.has('plan.tsv')) return 'plan.tsv 없음'
+    const lines = this.text('plan.tsv')
+      .split('\n')
+      .filter((l) => l !== '')
+    if (!lines.length) return 'plan.tsv 가 빔'
+    const bad = lines.findIndex((l) => {
+      const c = l.split('\t')
+      return c.length < 5 || (c[0] !== 'M' && c[0] !== 'A') || c.slice(1, 5).some((x) => x.trim() === '')
+    })
+    return bad < 0 ? null : `plan.tsv ${bad + 1}째 줄이 깨짐`
+  }
+
   list(name: 'manual.tsv' | 'skip.tsv' | 'notes.tsv'): ListRow[] {
     return this.text(name)
       .split('\n')
@@ -158,6 +179,23 @@ export class Run {
     return /^\d{2}:\d{2}:\d{2} 업로드 시작/m.test(this.text('deploy.log')) ? 'unknown' : null
   }
 
+  /** 업로드한 FTP 계정의 지문(upload.account 첫 줄, account.ts). 지문을 남기기 전의 run 이거나 올린 적 없으면 null. */
+  account(): string | null {
+    return this.text('upload.account').split('\n')[0].trim() || null
+  }
+
+  /** 백업 정리로 백업 파일을 지웠으면 그 시각(글자). 지운 run 은 되돌리기·업로드·다시 백업을 하지 않는다(ADR 0006). */
+  backupPruned(): string | null {
+    if (this.pruneUnfinished()) return `${this.text('backup.pruning').split('\n')[0].trim() || '?'} 지우다 멈춤, 일부 남음`
+    return this.has('backup.pruned') ? this.text('backup.pruned').split('\n')[0].trim() || '?' : null
+  }
+
+  /** 백업 정리가 지우는 중에 멈췄는가(backup.pruning 이 남고 backup.pruned 는 없음). 백업 지움과 같이 막고, 다음 백업 정리가 보존 규칙을 다시 거쳐 지울 수 있으면 남은 백업을 마저 지운다. */
+  pruneUnfinished(): boolean {
+    // backup.pruned 는 다 지운 뒤에만 쓴다: 있으면 지우기는 끝났고 남은 backup.pruning 은 치우지 못한 표시일 뿐이다.
+    return this.has('backup.pruning') && !this.has('backup.pruned')
+  }
+
   /** 업로드를 시작한 적이 있는가(끝났든 아니든). */
   uploadBegun(): boolean {
     return this.uploadAt() !== null
@@ -217,6 +255,7 @@ function indexed(targetId: string): Map<string, string> {
   return m
 }
 
+
 /** 이 대상의 run 이 있을 수 있는 폴더들: 지금 설정, 색인, 지운 설정들. */
 function runDirsOf(targetId: string): string[] {
   const dirs: string[] = []
@@ -227,6 +266,30 @@ function runDirsOf(targetId: string): string[] {
   for (const t of targetHistory(targetId)) add(runsDir(t))
   for (const dir of indexed(targetId).values()) add(dirname(dir))
   return dirs
+}
+
+/** 경로 비교용: 슬래시 통일, 끝 슬래시 뺌, Windows 면 대소문자 무시. */
+const samePathKey = (p: string) => {
+  const n = p.replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? n.toLowerCase() : n
+}
+
+/**
+ * run 폴더가 이 대상의 run 기록 폴더 바로 아래의 진짜 폴더인가: 링크·정션이 아니고, 실경로도 그 아래. 아니면 그 이유.
+ * 지우는 일(백업 정리)이 링크를 따라 run 기록 폴더 밖을 건드리지 않게 쓴다.
+ */
+export function runDirProblem(run: Run): string | null {
+  try {
+    if (lstatSync(run.dir).isSymbolicLink()) return `run 폴더가 링크(정션)임: ${run.dir}`
+    const real = samePathKey(realpathSync.native(run.dir))
+    const homes = runDirsOf(run.target.id)
+      .filter((d) => existsSync(d))
+      .map((d) => samePathKey(realpathSync.native(d)))
+    if (!homes.some((d) => real === `${d}/${samePathKey(run.id)}`)) return `run 폴더의 실경로가 run 기록 폴더 밖(링크·정션을 따라감): ${real}`
+    return null
+  } catch (e) {
+    return `run 폴더를 확인하지 못함: ${(e as Error).message}`
+  }
 }
 
 function findRunDir(id: string, targetId: string): string | null {

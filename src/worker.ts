@@ -11,6 +11,7 @@ import { Ftp, PROBE_SECONDS, resolveAuth, type FtpAuth } from './engine/ftp.ts'
 import { gitText, mergedPrs } from './engine/git.ts'
 import { jobsDir, listJobs, newJobId, readJob, writeJob, type Job, type JobStep } from './engine/jobs.ts'
 import { preflight } from './engine/plan.ts'
+import { prunePlan, pruneBackups } from './engine/prune.ts'
 import { clearStaleLock, isHidden, listRuns, openRun, setHidden } from './engine/runs.ts'
 import { exportChecked, parseShared, repoIdentity, sameRepoIdentity, sharedToTarget } from './engine/share.ts'
 import { isDir, mergeSuggestion, suggestFromRepo } from './engine/suggest.ts'
@@ -596,7 +597,8 @@ export default function activate(orca: OrcaWorkerApi): void {
           uploaded: v.uploaded,
           createdAt: v.createdAt,
           subject: v.subject,
-          hidden: isHidden(r)
+          hidden: isHidden(r),
+          backupPruned: v.backupPruned !== null
         }
       })
     )
@@ -612,6 +614,15 @@ export default function activate(orca: OrcaWorkerApi): void {
         else kept++
       }
       return { count, kept }
+    })
+  )
+
+  orca.panels.handle('backups.prunePlan', ({ target }) => guard(() => prunePlan(loadTarget(target))))
+
+  orca.panels.handle('backups.prune', ({ target, ids }) =>
+    guard(() => {
+      const r = pruneBackups(loadTarget(target), ids, 'panel')
+      return { count: r.pruned.length, bytes: r.pruned.reduce((n, x) => n + x.bytes, 0), skipped: r.skipped, failed: r.failed }
     })
   )
 

@@ -1,7 +1,7 @@
 // 리뷰(2026-11-06 Codex 1·2차)에서 나온 안전 문제의 회귀 시험. FTP 없이 run 기록·잠금·설정만으로 본다.
 // 사용법: node --test test/safety.spec.ts
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,7 +13,7 @@ process.env.PRODDEPLOY_HOME = `${tmp}/home`
 const { acquireLock, clearStaleLock, listRuns, newRun, openRun, readLock } = await import('../src/engine/runs.ts')
 const { configChanged, laterOverlaps, rollback } = await import('../src/engine/steps.ts')
 const { deleteTarget, saveTarget } = await import('../src/engine/target.ts')
-const { toMsys } = await import('../src/engine/util.ts')
+const { sha256, toMsys } = await import('../src/engine/util.ts')
 
 const target = {
   id: 'fx',
@@ -36,6 +36,8 @@ type Fake = {
   snapshot?: boolean
   dir?: string
   logOnly?: boolean
+  /** 업로드한 계정의 지문(upload.account). 없으면 지문을 남기기 전의 기록. */
+  account?: string
 }
 
 /** run 폴더를 손으로 만든다. upload: 새 형식 업로드 시작 ms, done: upload.done 내용(bash 형식 날짜) 또는 true. */
@@ -50,6 +52,7 @@ function fakeRun(id: string, files: string[], o: Fake = {}) {
   if (o.log) writeFileSync(`${dir}/deploy.log`, o.log)
   writeFileSync(`${dir}/backup.done`, 'x\n')
   if (o.upload) writeFileSync(`${dir}/upload.started`, `x\n${o.upload}\n`)
+  if (o.account) writeFileSync(`${dir}/upload.account`, `${o.account}\n`)
   if (o.done) writeFileSync(`${dir}/upload.done`, o.done === true ? '2026-11-06 12:00:00\n' : `${o.done}\n`)
   return openRun(id)
 }
@@ -236,6 +239,257 @@ test('같은 이름이라도 다른 서버의 run 은 나중 run 판정에 섞�
   writeFileSync(`${bDir}/upload.started`, 'x\n2000\n')
   writeFileSync(`${bDir}/upload.done`, '2026-11-06 20:00:02\n')
   assert.ok(!laterOverlaps(a).some((x) => x.run === 'fx-20261106-200001-aaaaaab2'))
+})
+
+test('다른 계정(지문)의 나중 run 은 되돌리기를 막지 않고, 같은 계정·지문 없는 run 은 지금처럼 막는다', () => {
+  const X = '1111111111111111'
+  const Y = '2222222222222222'
+  // 계정마다 루트(chroot)가 다를 수 있다: 다른 지문의 run 은 같은 경로라도 다른 파일을 건드렸다.
+  const a = fakeRun('fx-20261110-100000-acc00001', ['acc1.xml'], { upload: 1000, done: true, account: X })
+  const b = fakeRun('fx-20261110-100001-acc00002', ['acc1.xml'], { upload: 2000, done: true, account: Y })
+  assert.deepEqual(laterOverlaps(a).map((x) => x.run), [], `다른 계정의 ${b.id} 는 나중 run 이 아님`)
+  // 같은 지문
+  const c = fakeRun('fx-20261110-100002-acc00003', ['acc2.xml'], { upload: 1000, done: true, account: X })
+  const d = fakeRun('fx-20261110-100003-acc00004', ['acc2.xml'], { upload: 2000, done: true, account: X })
+  assert.deepEqual(laterOverlaps(c).map((x) => x.run), [d.id])
+  // 지문 없는 run 은 같은 계정으로 본다(양쪽 방향)
+  const e = fakeRun('fx-20261110-100004-acc00005', ['acc3.xml'], { upload: 1000, done: true })
+  const f = fakeRun('fx-20261110-100005-acc00006', ['acc3.xml'], { upload: 2000, done: true, account: Y })
+  assert.deepEqual(laterOverlaps(e).map((x) => x.run), [f.id])
+  const g = fakeRun('fx-20261110-100006-acc00007', ['acc4.xml'], { upload: 1000, done: true, account: X })
+  const h = fakeRun('fx-20261110-100007-acc00008', ['acc4.xml'], { upload: 2000, done: true })
+  assert.deepEqual(laterOverlaps(g).map((x) => x.run), [h.id])
+})
+
+test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀번호와 이름 그대로는 담지 않는다', async () => {
+  const { accountMark } = await import('../src/engine/account.ts')
+  const t = { ...target, connection: { ...target.connection, host: 'FTP.Example.com', port: 2121 } }
+  const want = (user: string) => sha256(`prod-deploy account\nftp.example.com:2121\n${user}`).slice(0, 16)
+  const m = accountMark(t, { kind: 'user', user: 'alice', password: 'secret' })
+  assert.equal(m, want('alice'))
+  assert.match(m, /^[0-9a-f]{16}$/)
+  assert.equal(accountMark(t, { kind: 'user', user: 'alice', password: 'other' }), m, '비밀번호는 지문에 들지 않음')
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'bob', password: 'secret' }), m)
+  assert.notEqual(accountMark({ ...t, connection: { ...t.connection, port: 21 } }, { kind: 'user', user: 'alice', password: 'secret' }), m)
+  // curl 이 보내는 사용자 이름을 글자 그대로 쓴다: 앞뒤 공백도 빼지 않고(재검토 3-1), 대소문자도 그대로
+  assert.notEqual(accountMark(t, { kind: 'user', user: ' alice ', password: 'x' }), m)
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'team', password: 'x' }), accountMark(t, { kind: 'user', user: 'team ', password: 'x' }))
+  assert.equal(accountMark(t, { kind: 'user', user: 'team ', password: 'x' }), want('team '))
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'Alice', password: 'x' }), m)
+})
+
+
+test('netrc 읽기: 엔진이 대상 호스트의 login·password 를 정한다(주석·따옴표·macdef·default)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const read = (text: string, host = 'ftp.example.com') => parseNetrc(text, host, 'test.netrc')
+  assert.deepEqual(read('machine ftp.example.com login alice password s3cret\n'), { user: 'alice', password: 's3cret' })
+  // 줄 머리 # 주석(항목 안의 주석 줄 포함), 여러 줄 항목, 호스트·키워드 대소문자 무시, CRLF
+  assert.deepEqual(read('# FTP accounts\r\nMACHINE FTP.Example.com\r\n  # 메모\r\n  LOGIN alice\r\n  password p\r\n'), { user: 'alice', password: 'p' })
+  // 큰따옴표 값: 안의 공백과 \ 이스케이프. login fa-x 와 login "fa-x" 는 같다
+  assert.deepEqual(read('machine ftp.example.com login "fa-x" password "p login first q"\n'), { user: 'fa-x', password: 'p login first q' })
+  assert.deepEqual(read('machine ftp.example.com login "team one" password "a\\"b\\\\c"\n'), { user: 'team one', password: 'a"b\\c' })
+  // 비밀번호 값은 키워드로 읽지 않는다
+  assert.deepEqual(read('machine ftp.example.com password login login alice\n'), { user: 'alice', password: 'login' })
+  // 다른 호스트 항목의 값이 키워드 같은 낱말이어도 값이다(재검토 1)
+  assert.deepEqual(read('machine elsewhere login macdef password p\nmachine ftp.example.com login alice password q\n'), { user: 'alice', password: 'q' })
+  // 항목 밖 macdef 본문(빈 줄·공백만 있는 줄까지)의 가짜 항목은 읽지 않는다. U+00A0 만 있는 줄은 빈 줄이 아니다
+  assert.deepEqual(read('macdef init\nmachine ftp.example.com login evil password e\n  \nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  assert.deepEqual(read('macdef init\n \nmachine ftp.example.com login evil password e\n\nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  assert.deepEqual(read('machine ftp.example.com login alice password p\nmacdef init\ncd /x\n\n'), { user: 'alice', password: 'p' }, '다 적은 항목 뒤의 macdef')
+  // 맞는 machine 이 없으면 default, 둘 다 맞으면 machine
+  assert.deepEqual(read('machine other login o password o\ndefault login dflt password d\n'), { user: 'dflt', password: 'd' })
+  assert.deepEqual(read('default login dflt password d\nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  // UTF-8 BOM 은 무시한다
+  assert.deepEqual(read('﻿machine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+})
+
+test('netrc 읽기: 이상한 모양은 고르지 않고 멈춘다(줄 번호와 이유만, 값은 적지 않음)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const secret = 'zz-secret-9d1'
+  const stops = (text: string | Buffer, why: RegExp, host = 'ftp.example.com') =>
+    assert.throws(
+      () => parseNetrc(text, host, 'test.netrc'),
+      (e: Error) => {
+        assert.match(e.message, why)
+        assert.ok(!e.message.includes(secret), `값이 문구에 나옴: ${e.message}`)
+        assert.ok(!e.message.includes('alice'), `값이 문구에 나옴: ${e.message}`)
+        return true
+      }
+    )
+  const ok = `machine ftp.example.com login alice password ${secret}\n`
+  stops(`${ok}machine ftp.example.com login bob password ${secret}\n`, /2행.*둘 이상/)
+  stops(`machine ftp.example.com login alice password ${secret} login bob password q\n`, /1행.*login.*두 번/)
+  stops(`machine ftp.example.com login alice password ${secret}\n password q\n`, /2행.*password.*두 번/)
+  stops(`machine ftp.example.com login alice password ${secret} # 메모\n`, /1행.*모르는 낱말/)
+  stops(`machine ftp.example.com login alice account a password ${secret}\n`, /1행.*모르는 낱말/)
+  stops(`machine ftp.example.com login alice\nmacdef init\n\npassword ${secret}\n`, /2행.*macdef/)
+  stops(`machine ftp.example.com macdef m\n\n${ok}`, /1행.*macdef/)
+  stops(`${ok}machine unrelated login "unfinished\n`, /2행.*따옴표/, 'ftp.example.com')
+  stops(`machine ftp.example.com login "alice\\tx" password ${secret}\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password ${secret}\u0001\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password\n`, /1행.*password.*값이 없음/)
+  stops(`machine\n`, /1행.*호스트/)
+  stops(`login alice password ${secret}\n`, /1행.*항목 밖/)
+  stops(`machine other login alice password ${secret}\n`, /ftp\.example\.com.*항목이 없음/)
+  stops(`machine ftp.example.com password ${secret}\n`, /login 이 없음/)
+  stops(`machine ftp.example.com login alice\n`, /password 가 없음/)
+  stops(Buffer.from([...Buffer.from('machine ftp.example.com login al'), 0x81, ...Buffer.from(` password ${secret}\n`)]), /UTF-8/)
+  // 재검토 3-4: 따옴표 값 안의 실제 탭, C1 제어 문자(U+0080–U+009F, 주석·값 어디든), 빈 호스트
+  stops(`machine ftp.example.com login "al\tice" password ${secret}\n`, /1행.*탭/)
+  stops(`machine ftp.example.com login alice password "${secret}\tq"\n`, /1행.*탭/)
+  stops(`# 메모\u0085\n${ok}`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password ${secret}\u009f\n`, /1행.*제어 문자/)
+  stops(`machine "" login bob password q\ndefault login alice password ${secret}\n`, /1행.*호스트가 비었음/)
+  // 구분자로 쓴 탭은 그대로 된다
+  assert.deepEqual(parseNetrc(`machine\tftp.example.com\tlogin\talice\tpassword\t${secret}\n`, 'ftp.example.com', 'test.netrc'), { user: 'alice', password: secret })
+  // 비UTF-8 은 그 줄 번호를 준다
+  stops(Buffer.from([...Buffer.from(`# 첫 줄\nmachine ftp.example.com login al`), 0x81, ...Buffer.from(` password ${secret}\n`)]), /2행.*UTF-8/)
+  // 재검토 4-2: 따옴표 안 \ 바로 뒤의 실제 탭(이스케이프를 푼 값에 탭이 남음) — login·password 두 칸
+  stops(`machine ftp.example.com login "al\\\tice" password ${secret}\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password "${secret}\\\tq"\n`, /1행.*제어 문자/)
+})
+
+test('netrc 읽기: 파일 맨 처음의 BOM 만 빼고, 값 안의 U+FEFF 는 그대로 둔다 (재검토 4-3)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const bom = Buffer.from([0xef, 0xbb, 0xbf])
+  const read = (b: Buffer) => parseNetrc(b, 'ftp.example.com', 'test.netrc')
+  // 파일 맨 처음 BOM 은 뺀다
+  assert.deepEqual(read(Buffer.concat([bom, Buffer.from('machine ftp.example.com login alice password p\n')])), { user: 'alice', password: 'p' })
+  // login 다음 줄의 값이 U+FEFF 로 시작하면 그 글자를 이름에 둔다(줄 머리라도 빼지 않음)
+  const mid = Buffer.concat([Buffer.from('machine ftp.example.com login\n'), bom, Buffer.from('name password p\n')])
+  assert.deepEqual(read(mid), { user: '﻿name', password: 'p' })
+  // 줄 번호 추적은 그대로: BOM 뒤 줄의 UTF-8 오류도 그 줄 번호
+  stopsAt(Buffer.concat([bom, Buffer.from('# a\n# b\n'), Buffer.from([0x81]), Buffer.from('\n')]), /3행.*UTF-8/)
+  function stopsAt(b: Buffer, why: RegExp) {
+    assert.throws(() => read(b), (e: Error) => why.test(e.message))
+  }
+})
+
+test('계정 지문: curl 판 해석을 섞은 듯한 이름도 그 이름 그대로 지문을 만들고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
+  const { accountMark } = await import('../src/engine/account.ts')
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
+  const markOf = (text: string) => accountMark(t, { kind: 'user', ...parseNetrc(text, 'ftp.example.com', 'test.netrc') })
+  const odd = 'netrc curl 8.19="alice" 8.21="bob"'
+  const oddMark = markOf(`machine ftp.example.com login "netrc curl 8.19=\\"alice\\" 8.21=\\"bob\\"" password p\n`)
+  assert.equal(oddMark, accountMark(t, { kind: 'user', user: odd, password: 'p' }))
+  assert.notEqual(oddMark, markOf('machine ftp.example.com login alice password p\n'))
+  assert.notEqual(oddMark, markOf('machine ftp.example.com login bob password p\n'))
+  assert.equal(markOf('machine ftp.example.com login alice password one\n'), markOf('# 바꿈\nmachine ftp.example.com login "alice" password "two words"\n'))
+})
+
+/**
+ * 자식 Node 에서 resolveAuth 를 부른다. 자격 증명 관리자(PowerShell) 호출만 가짜로 바꿔, 실제 자격 증명 관리자를 쓰지 않고
+ * PD_FAKE_CRED(user, password) 를 저장된 값처럼 돌려준다. 결과는 'ok <같으면 same>' 또는 'stop <문구>' 한 줄.
+ */
+function resolveWithCred(user: string, password: string): string {
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64')
+  const fake = `data:text/javascript,${encodeURIComponent(
+    [
+      "import cp from 'node:child_process'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const real = cp.spawn',
+      'cp.spawn = (cmd, args, opts) => /powershell\\.exe$/i.test(String(cmd))',
+      "  ? real(process.execPath, ['-e', \"process.stdin.resume();process.stdin.on('end',()=>console.log(process.env.PD_FAKE_CRED))\"], opts)",
+      '  : real(cmd, args, opts)',
+      'syncBuiltinESMExports()'
+    ].join('\n')
+  )}`
+  const ftp = new URL('../src/engine/ftp.ts', import.meta.url).href
+  const script = [
+    `const { resolveAuth } = await import(${JSON.stringify(ftp)})`,
+    "const t = { id: 'cred-fake', connection: { protocol: 'ftp', host: 'ftp.example.com', port: 21, root: '/' } }",
+    'try {',
+    '  const a = await resolveAuth(t)',
+    "  console.log('ok ' + (a.user === process.env.PD_WANT_USER && a.password === process.env.PD_WANT_PASSWORD ? 'same' : 'different'))",
+    "} catch (e) { console.log('stop ' + e.message) }"
+  ].join('\n')
+  const r = spawnSync(process.execPath, ['--import', fake, '--input-type=module', '-e', script], {
+    env: { ...process.env, PD_FAKE_CRED: `ok ${b64(user)} ${b64(password)}`, PD_WANT_USER: user, PD_WANT_PASSWORD: password },
+    encoding: 'utf8'
+  })
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
+}
+
+/**
+ * 자식 Node 에서 Ftp 를 부른다. curl 실행만 가짜로 바꿔(PD_FAKE_ERR 를 stderr 로 내고 PD_FAKE_CODE 로 끝남) 비밀번호 password
+ * 로 probe·exists(목록 실패 → Stop)·connVerdict 를 돌리고, 로그·probe 반환·Stop 문구·패널 문구를 JSON 한 줄로 돌려준다.
+ */
+function fakeCurl(password: string, err: string, code: number): { logs: string[]; probe: string; stop: string; verdict: string } {
+  const fake = `data:text/javascript,${encodeURIComponent(
+    [
+      "import cp from 'node:child_process'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const real = cp.spawn',
+      "cp.spawn = (cmd, args, opts) => String(cmd) === 'curl'",
+      "  ? real(process.execPath, ['-e', \"process.stdin.resume();process.stdin.on('end',()=>{process.stderr.write(process.env.PD_FAKE_ERR);process.exit(Number(process.env.PD_FAKE_CODE))})\"], opts)",
+      '  : real(cmd, args, opts)',
+      'syncBuiltinESMExports()'
+    ].join('\n')
+  )}`
+  const url = (p: string) => JSON.stringify(new URL(p, import.meta.url).href)
+  const script = [
+    `const { Ftp } = await import(${url('../src/engine/ftp.ts')})`,
+    `const { connVerdict } = await import(${url('../src/conn-verdict.ts')})`,
+    "const t = { id: 'fake', label: 'FAKE', connection: { protocol: 'ftp', host: 'ftp.example.com', port: 21, root: '/app' } }",
+    'const logs = []',
+    "const ftp = new Ftp(t, { kind: 'user', user: 'u', password: process.env.PD_FAKE_PASSWORD }, (s) => logs.push(s))",
+    "const p = await ftp.probe('/app', 5)",
+    "let stop = ''",
+    "try { await ftp.exists('/app/x/f.txt') } catch (e) { stop = e.message }",
+    'console.log(JSON.stringify({ logs, probe: JSON.stringify(p), stop, verdict: connVerdict(t, p, 5).message }))'
+  ].join('\n')
+  const r = spawnSync(process.execPath, ['--import', fake, '--input-type=module', '-e', script], {
+    env: { ...process.env, PD_FAKE_ERR: err, PD_FAKE_CODE: String(code), PD_FAKE_PASSWORD: password },
+    encoding: 'utf8'
+  })
+  assert.equal(r.status, 0, r.stderr)
+  return JSON.parse(r.stdout.trim().split('\n').pop()!)
+}
+
+test('curl 오류: 가린 글자를 로그·Stop 문구·probe 반환·패널 문구가 함께 쓴다(비밀번호 값 없음) (재검토 4-1)', () => {
+  const secret = 'zz-Secret-41c9'
+  const err = `> USER u\r\n> PASS ${secret}\r\ncurl: (56) Recv failure near ${secret}\n`
+  const got = fakeCurl(secret, err, 56)
+  const all = [...got.logs, got.probe, got.stop, got.verdict]
+  assert.ok(got.logs.length > 0 && got.stop && got.verdict, JSON.stringify({ ...got, logs: got.logs.length }))
+  for (const s of all) assert.ok(!s.includes(secret), '비밀번호가 남음')
+  // 오류 줄에 비밀번호가 섞였으니 오류 글자는 통째로 숨기고, 패널은 종료 코드로 고른 문구
+  assert.match(got.verdict, /\[curl 56\]$/)
+  assert.match(got.stop, /curl 56/)
+})
+
+test('curl 오류: 짧은 비밀번호를 가려도 로그에 curl 종료 코드가 보인다 (재검토 4-4)', () => {
+  const got = fakeCurl('5', 'curl: (55) Failed sending data to the peer\n', 55)
+  assert.ok(got.logs.some((l) => /curl 종료 55:/.test(l)), JSON.stringify(got.logs))
+})
+
+test('curl 오류: 비밀번호와 같은 글자가 오류 글자에 있으면 조각을 남기지 않고 통째로 숨기고, 종료 코드는 보인다 (Claude 검토 1)', () => {
+  // 비밀번호 3 은 서버 응답 530 의 한 글자다: 그 자리만 가리면 5***0 처럼 남아 값을 짐작할 수 있다.
+  const got = fakeCurl('3', 'curl: (67) Access denied: 530\n', 67)
+  const all = [...got.logs, got.probe, got.stop, got.verdict]
+  for (const s of all) {
+    assert.ok(!s.includes('530'), `원문이 남음: ${s}`)
+    assert.ok(!s.includes('***'), `가린 자리 조각이 남음: ${s}`)
+  }
+  assert.ok(got.logs.some((l) => /^curl 종료 67: /.test(l)), JSON.stringify(got.logs))
+  assert.match(got.stop, /curl 67/)
+  assert.match(got.verdict, /^로그인 실패 .*\[curl 67\]$/, '패널은 종료 코드로 고른 문구')
+})
+
+test('접속 정보: 사용자 이름에 콜론이 있으면 자격 증명 관리자·netrc 어느 쪽이든 멈춘다(값은 문구에 없음). 비밀번호의 콜론은 된다 (재검토 3-2)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  // 자격 증명 관리자에서 읽은 값
+  const stopped = resolveWithCred('al:ice', 'zz-secret-7')
+  assert.match(stopped, /^stop .*사용자 이름에 콜론이 있음/)
+  assert.ok(!stopped.includes('al:ice') && !stopped.includes('zz-secret-7'), stopped)
+  assert.equal(resolveWithCred('alice', 'p:w:zz-secret-7'), 'ok same')
+  // netrc 에서 읽은 값
+  assert.throws(
+    () => parseNetrc('machine ftp.example.com login al:ice password zz-secret-7\n', 'ftp.example.com', 'test.netrc'),
+    (e: Error) => /1행.*사용자 이름에 콜론이 있음/.test(e.message) && !e.message.includes('al:ice') && !e.message.includes('zz-secret-7')
+  )
+  assert.deepEqual(parseNetrc('machine ftp.example.com login alice password p:w\n', 'ftp.example.com', 'test.netrc'), { user: 'alice', password: 'p:w' })
 })
 
 test('작업 기록: 프로세스 번호가 다른 프로세스에 다시 쓰여도, beat 가 멈췄으면 끝난 작업으로 본다', async () => {

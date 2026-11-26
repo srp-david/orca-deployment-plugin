@@ -2,6 +2,7 @@
 // 모두 대상 잠금 안에서 돌고, run 상태 검사도 잠금을 잡은 뒤에 한다. 업로드·되돌리기는 확인 코드가 맞아야 한다.
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { accountMark, sameAccount } from './account.ts'
 import { Ftp, resolveAuth } from './ftp.ts'
 import { git, gitText } from './git.ts'
 import { acquireLock, listRuns, openRun, type PlanRow, type Run } from './runs.ts'
@@ -28,6 +29,12 @@ function stop(run: Run, h: StepHooks, msg: string): never {
   const e = new Stop(msg)
   e.reported = true
   throw e
+}
+
+/** 백업 정리로 백업을 지운 run 은 다시 백업·업로드·되돌리기를 하지 않는다(ADR 0006). */
+function assertBackupKept(run: Run, h: StepHooks, what: string): void {
+  const at = run.backupPruned()
+  if (at) stop(run, h, `백업 지움(${at}, 백업 정리) — ${what}`)
 }
 
 function assertUsable(run: Run, h: StepHooks): void {
@@ -124,6 +131,7 @@ export async function backup(id: string, h: StepHooks = {}): Promise<void> {
     const log = logger(run, h)
     assertUsable(run, h)
     if (run.uploadBegun()) stop(run, h, '이미 업로드를 시작한 run — 백업을 다시 받지 않음')
+    assertBackupKept(run, h, '오래된 run 이라 다시 백업하지 않음. 새로 plan')
     if (configChanged(run)) stop(run, h, '대상 설정이 plan 이후 바뀜 — 새로 plan')
     run.remove('backup.done')
     const tmp = run.path('backup.tmp')
@@ -225,13 +233,19 @@ export async function upload(id: string, code: string, yes: boolean, h: StepHook
     if (run.has('rollback.done')) stop(run, h, '되돌린 run — 다시 올리려면 새로 plan')
     if (run.has('upload.done')) stop(run, h, '이미 올린 run — 다시 올리려면 새로 plan')
     if (run.uploadBegun()) stop(run, h, '부분 업로드된 run — 이어 올리지 않음. 되돌린 뒤 새로 plan')
+    assertBackupKept(run, h, '오래된 run 이라 올리지 않음. 새로 plan')
     if (!run.has('backup.done')) stop(run, h, `백업 먼저(backup ${run.id})`)
     if (configChanged(run)) stop(run, h, '대상 설정이 plan 이후 바뀜 — 새로 plan')
     checkBackup(run, h)
     const rows = run.plan()
     const staged = stage(run, rows, h)
-    const ftp = new Ftp(run.target, await resolveAuth(run.target), (s) => run.log(s))
+    // 접속 정보는 한 번 읽은 값을 이 업로드 끝까지 쓴다(netrc 도 엔진이 읽어 값으로 넘김): 도중에 바뀌어도 같은 계정으로 보낸다.
+    const auth = await resolveAuth(run.target)
+    const ftp = new Ftp(run.target, auth, (s) => run.log(s))
     await recheck(run, ftp, h)
+    // 파일을 실제로 올린 계정이 이 run 의 계정이다: 정리·되돌리기가 다른 계정(다른 루트)의 run 과 섞지 않게.
+    // 업로드 시작 표시(로그·upload.started)보다 먼저 쓴다: 쓰지 못하면 보내기 전에 멈추고, 원인을 치운 뒤 같은 run 을 다시 올린다.
+    run.write('upload.account', `${accountMark(run.target, auth)}\n`)
     log(`업로드 시작: ${run.target.label} ${rows.length}개 (코드 ${run.code()})`)
     run.write('upload.started', `${dateTime()}\n${Date.now()}\n`)
     let n = 0
@@ -292,6 +306,8 @@ export function laterOverlaps(run: Run): { run: string; files: string[]; unknown
     // 같은 이름이라도 다른 서버(호스트·포트)의 run 은 같은 운영 파일이 아니다(경로는 운영 루트를 포함해 비교).
     const there = destOf(other.target)
     if (there.host !== here.host || there.port !== here.port) continue
+    // 다른 FTP 계정으로 올린 run 도 다른 파일일 수 있다(계정마다 루트가 다름). 지문이 없는 run 은 같은 계정으로 본다.
+    if (!sameAccount(run.account(), other.account())) continue
     const s = other.status()
     if (s !== 'partial' && s !== 'uploaded' && s !== 'verified') continue
     const when = other.uploadAt()
@@ -329,6 +345,7 @@ export async function rollback(id: string, code: string, yes: boolean, h: StepHo
     const log = logger(run, h)
     assertUsable(run, h)
     checkCode(run, h, code, yes)
+    assertBackupKept(run, h, '되돌릴 수 없음(손으로 확인)')
     if (!run.has('backup.done')) stop(run, h, '백업 없음')
     if (run.has('rollback.done')) stop(run, h, '이미 되돌린 run')
     if (!run.uploadBegun()) stop(run, h, '올린 적 없는 run — 되돌릴 것이 없음')

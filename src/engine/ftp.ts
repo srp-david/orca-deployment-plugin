@@ -2,22 +2,33 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { readCredential } from './creds.ts'
+import { readNetrc, USER_COLON } from './netrc.ts'
 import { netrcPath, type Target } from './target.ts'
 import { exec, sha256, Stop, toNative } from './util.ts'
 
-export type FtpAuth = { kind: 'user'; user: string; password: string } | { kind: 'netrc'; file: string }
+/** 접속 정보. 자격 증명 관리자든 netrc 든 엔진이 값을 정해 curl 에 stdin 으로 넘긴다(curl 이 netrc 를 따로 읽지 않음). */
+export type FtpAuth = { kind: 'user'; user: string; password: string }
 
-/** 자격 증명 관리자 → 없으면 옮기는 동안의 netrc. 둘 다 없으면 멈춘다. */
+/**
+ * 자격 증명 관리자 → 없으면 옮기는 동안의 netrc. 둘 다 없으면 멈춘다. netrc 는 엔진이 한 번 읽어 대상 호스트의 login·password
+ * 를 정한다(netrc.ts, 이상한 모양이면 멈춤). 그래서 한 작업은 처음 읽은 값으로 끝까지 접속하고, 계정 지문도 보낸 이름으로 만든다.
+ */
 export async function resolveAuth(t: Target): Promise<FtpAuth> {
   const c = await readCredential(t.id)
-  if (c) return { kind: 'user', user: c.user, password: c.password }
+  if (c) {
+    if (c.user.includes(':')) throw new Stop(`자격 증명 관리자의 prod-deploy:${t.id} 를 쓸 수 없음 — ${USER_COLON}. 패널의 대상 설정에서 고치세요`)
+    return { kind: 'user', user: c.user, password: c.password }
+  }
   const netrc = netrcPath(t)
   if (netrc) {
-    if (existsSync(toNative(netrc))) return { kind: 'netrc', file: toNative(netrc) }
+    if (existsSync(toNative(netrc))) return { kind: 'user', ...readNetrc(toNative(netrc), t.connection.host, netrc) }
     throw new Stop(`접속 정보 없음: 자격 증명 관리자에 prod-deploy:${t.id} 가 없고 ${netrc} 도 없음`)
   }
   throw new Stop(`접속 정보 없음: 자격 증명 관리자에 prod-deploy:${t.id} 가 없음 (패널의 대상 설정에서 넣기)`)
 }
+
+/** curl 오류 글자에 비밀번호와 같은 글자가 있을 때 그 글자 대신 내는 문구. */
+const SECRET_HIDDEN = 'curl 오류 글자에 비밀번호와 같은 글자가 있어 숨김'
 
 const quote = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 
@@ -57,19 +68,29 @@ export class Ftp {
   }
 
   private async curl(args: string[], seconds = 60): Promise<{ ok: boolean; code: number; out: Buffer; err: string }> {
-    const common = ['-sS', '--max-time', String(seconds)]
+    // -q 는 맨 앞이어야 한다: 사용자 curl 설정(.curlrc)을 읽지 않는다(설정의 verbose 등이 인증 대화를 출력에 섞지 않게).
+    const common = ['-q', '-sS', '--max-time', String(seconds)]
     const verbose = !!process.env.PRODDEPLOY_CURL_VERBOSE
     if (verbose) common.push('-v')
     if (this.t.connection.passive === false) common.push('--ftp-port', '-')
-    let input = ''
-    if (this.auth.kind === 'user') {
-      common.push('-K', '-')
-      input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
-    } else common.push('--netrc-file', this.auth.file)
+    common.push('-K', '-')
+    const input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
-    if (r.code !== 0 && r.err.trim())
-      this.log(`curl: ${verbose ? r.err.replace(/^> PASS .*$/gm, '> PASS ***') : r.err.trim()}`)
-    return { ok: r.code === 0, code: r.code, out: r.out, err: r.err }
+    // stderr 는 여기서 한 번만 가리고, 로그와 호출자(목록·접속 확인·멈춤 문구·패널)가 모두 가린 글자를 쓴다.
+    const err = this.hideSecret(r.err)
+    // 종료 코드는 가린 글자와 따로 적는다: 오류 글자를 통째로 숨겨도 코드는 보이게.
+    if (r.code !== 0 && err.trim()) this.log(`curl 종료 ${r.code}: ${err.trim()}`)
+    return { ok: r.code === 0, code: r.code, out: r.out, err }
+  }
+
+  /**
+   * curl stderr 를 밖으로 내기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가린다. 그 밖에 비밀번호와 같은 글자가 보이면 그
+   * 자리만 가리지 않고 stderr 전체를 정해 둔 문구로 바꾼다(짧은 비밀번호는 가린 자리의 앞뒤 글자로 짐작할 수 있어서).
+   * 그러면 접속 확인 패널은 오류 줄 없이 종료 코드만으로 문구를 고른다.
+   */
+  private hideSecret(s: string): string {
+    const masked = s.replace(/^> PASS [^\r\n]*/gm, '> PASS ***')
+    return this.auth.password && masked.includes(this.auth.password) ? SECRET_HIDDEN : masked
   }
 
   /** 폴더 목록 한 번: 성공이면 이름들, 실패면 curl 종료 코드. 같은 실행 안에서는 다시 묻지 않는다. */
