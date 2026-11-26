@@ -1,6 +1,8 @@
 """시험용 FTP 서버 (pyftpdlib). 운영 대신 쓴다.
 
-사용법: <venv python> -I test/ftp-server.py <루트 폴더> [포트=2121] [사용자=test] [비밀번호=test]
+사용법: <venv python> -I test/ftp-server.py <루트 폴더> [포트=2121] [사용자=test] [비밀번호=test] [사용자 비밀번호 루트 폴더]...
+  넷째 인자 뒤로 셋씩(사용자 비밀번호 루트 폴더) 더 주면 같은 호스트·포트에 계정을 더 둔다. 계정마다 루트 폴더가
+  홈(chroot)이다. 운영에서 같은 서버의 다른 FTP 계정이 다른 루트를 보는 것을 흉내 낸다.
 venv: ~/.prod-deploy/test-ftp/venv (python -m venv 후 pip install pyftpdlib)
 """
 import os
@@ -38,15 +40,23 @@ def main():
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 2121
     user = sys.argv[3] if len(sys.argv) > 3 else "test"
     password = sys.argv[4] if len(sys.argv) > 4 else "test"
-    os.makedirs(root, exist_ok=True)
+    accounts = [(user, password, root)]
+    more = sys.argv[5:]
+    if len(more) % 3:
+        sys.exit("더 두는 계정은 셋씩(사용자 비밀번호 루트 폴더) 주세요")
+    for i in range(0, len(more), 3):
+        accounts.append((more[i], more[i + 1], os.path.abspath(more[i + 2])))
     auth = DummyAuthorizer()
-    auth.add_user(user, password, root, perm="elradfmwMT")
+    for u, pw, home in accounts:
+        os.makedirs(home, exist_ok=True)
+        auth.add_user(u, pw, home, perm="elradfmwMT")
     handler = Handler
     handler.authorizer = auth
     handler.abstracted_fs = ReplacingFS
     handler.banner = "prod-deploy test ftp"
     server = FTPServer(("127.0.0.1", port), handler)
-    print(f"ready ftp://127.0.0.1:{port} root={root}", flush=True)
+    homes = " ".join(f"{u}={home}" for u, _, home in accounts)
+    print(f"ready ftp://127.0.0.1:{port} {homes}", flush=True)
     server.serve_forever()
 
 
