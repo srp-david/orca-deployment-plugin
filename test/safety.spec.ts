@@ -344,6 +344,25 @@ test('netrc 읽기: 이상한 모양은 고르지 않고 멈춘다(줄 번호와
   assert.deepEqual(parseNetrc(`machine\tftp.example.com\tlogin\talice\tpassword\t${secret}\n`, 'ftp.example.com', 'test.netrc'), { user: 'alice', password: secret })
   // 비UTF-8 은 그 줄 번호를 준다
   stops(Buffer.from([...Buffer.from(`# 첫 줄\nmachine ftp.example.com login al`), 0x81, ...Buffer.from(` password ${secret}\n`)]), /2행.*UTF-8/)
+  // 재검토 4-2: 따옴표 안 \ 바로 뒤의 실제 탭(이스케이프를 푼 값에 탭이 남음) — login·password 두 칸
+  stops(`machine ftp.example.com login "al\\\tice" password ${secret}\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password "${secret}\\\tq"\n`, /1행.*제어 문자/)
+})
+
+test('netrc 읽기: 파일 맨 처음의 BOM 만 빼고, 값 안의 U+FEFF 는 그대로 둔다 (재검토 4-3)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const bom = Buffer.from([0xef, 0xbb, 0xbf])
+  const read = (b: Buffer) => parseNetrc(b, 'ftp.example.com', 'test.netrc')
+  // 파일 맨 처음 BOM 은 뺀다
+  assert.deepEqual(read(Buffer.concat([bom, Buffer.from('machine ftp.example.com login alice password p\n')])), { user: 'alice', password: 'p' })
+  // login 다음 줄의 값이 U+FEFF 로 시작하면 그 글자를 이름에 둔다(줄 머리라도 빼지 않음)
+  const mid = Buffer.concat([Buffer.from('machine ftp.example.com login\n'), bom, Buffer.from('name password p\n')])
+  assert.deepEqual(read(mid), { user: '﻿name', password: 'p' })
+  // 줄 번호 추적은 그대로: BOM 뒤 줄의 UTF-8 오류도 그 줄 번호
+  stopsAt(Buffer.concat([bom, Buffer.from('# a\n# b\n'), Buffer.from([0x81]), Buffer.from('\n')]), /3행.*UTF-8/)
+  function stopsAt(b: Buffer, why: RegExp) {
+    assert.throws(() => read(b), (e: Error) => why.test(e.message))
+  }
 })
 
 test('계정 지문은 보낸 사용자 이름으로만 만든다: 이름이 무엇이든 다른 이름과 겹치지 않고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
@@ -391,6 +410,58 @@ function resolveWithCred(user: string, password: string): string {
   })
   return `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
 }
+
+/**
+ * 자식 Node 에서 Ftp 를 부른다. curl 실행만 가짜로 바꿔(PD_FAKE_ERR 를 stderr 로 내고 PD_FAKE_CODE 로 끝남) 비밀번호 password
+ * 로 probe·exists(목록 실패 → Stop)·connVerdict 를 돌리고, 로그·probe 반환·Stop 문구·패널 문구를 JSON 한 줄로 돌려준다.
+ */
+function fakeCurl(password: string, err: string, code: number): { logs: string[]; probe: string; stop: string; verdict: string } {
+  const fake = `data:text/javascript,${encodeURIComponent(
+    [
+      "import cp from 'node:child_process'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const real = cp.spawn',
+      "cp.spawn = (cmd, args, opts) => String(cmd) === 'curl'",
+      "  ? real(process.execPath, ['-e', \"process.stdin.resume();process.stdin.on('end',()=>{process.stderr.write(process.env.PD_FAKE_ERR);process.exit(Number(process.env.PD_FAKE_CODE))})\"], opts)",
+      '  : real(cmd, args, opts)',
+      'syncBuiltinESMExports()'
+    ].join('\n')
+  )}`
+  const url = (p: string) => JSON.stringify(new URL(p, import.meta.url).href)
+  const script = [
+    `const { Ftp } = await import(${url('../src/engine/ftp.ts')})`,
+    `const { connVerdict } = await import(${url('../src/conn-verdict.ts')})`,
+    "const t = { id: 'fake', label: 'FAKE', connection: { protocol: 'ftp', host: 'ftp.example.com', port: 21, root: '/app' } }",
+    'const logs = []',
+    "const ftp = new Ftp(t, { kind: 'user', user: 'u', password: process.env.PD_FAKE_PASSWORD }, (s) => logs.push(s))",
+    "const p = await ftp.probe('/app', 5)",
+    "let stop = ''",
+    "try { await ftp.exists('/app/x/f.txt') } catch (e) { stop = e.message }",
+    'console.log(JSON.stringify({ logs, probe: JSON.stringify(p), stop, verdict: connVerdict(t, p, 5).message }))'
+  ].join('\n')
+  const r = spawnSync(process.execPath, ['--import', fake, '--input-type=module', '-e', script], {
+    env: { ...process.env, PD_FAKE_ERR: err, PD_FAKE_CODE: String(code), PD_FAKE_PASSWORD: password },
+    encoding: 'utf8'
+  })
+  assert.equal(r.status, 0, r.stderr)
+  return JSON.parse(r.stdout.trim().split('\n').pop()!)
+}
+
+test('curl 오류: 가린 글자를 로그·Stop 문구·probe 반환·패널 문구가 함께 쓴다(비밀번호 값 없음) (재검토 4-1)', () => {
+  const secret = 'zz-Secret-41c9'
+  const err = `> USER u\r\n> PASS ${secret}\r\ncurl: (56) Recv failure near ${secret}\n`
+  const got = fakeCurl(secret, err, 56)
+  const all = [...got.logs, got.probe, got.stop, got.verdict]
+  assert.ok(got.logs.length > 0 && got.stop && got.verdict, JSON.stringify({ ...got, logs: got.logs.length }))
+  for (const s of all) assert.ok(!s.includes(secret), '비밀번호가 남음')
+  assert.match(got.verdict, /curl: \(56\)/, '오류 줄 자체는 패널에 보임')
+  assert.match(got.stop, /curl 56/)
+})
+
+test('curl 오류: 짧은 비밀번호를 가려도 로그에 curl 종료 코드가 보인다 (재검토 4-4)', () => {
+  const got = fakeCurl('5', 'curl: (55) Failed sending data to the peer\n', 55)
+  assert.ok(got.logs.some((l) => /curl 종료 55:/.test(l)), JSON.stringify(got.logs))
+})
 
 test('접속 정보: 사용자 이름에 콜론이 있으면 자격 증명 관리자·netrc 어느 쪽이든 멈춘다(값은 문구에 없음). 비밀번호의 콜론은 된다 (재검토 3-2)', async () => {
   const { parseNetrc } = await import('../src/engine/netrc.ts')
