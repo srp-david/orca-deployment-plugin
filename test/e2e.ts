@@ -69,10 +69,10 @@ const faText = (who: Account, p: string) => (existsSync(faFile(who, p)) ? readFi
 const faNetrc = `${tmp}/netrc-fa`
 /**
  * 대상 fa 가 접속할 계정을 바꾼다. 자격 증명 관리자에서 계정을 바꾸는 것처럼, 같은 자리(대상의 netrc 파일)에 다른 사용자를
- * 적는다. 대상 설정은 그대로다.
+ * 적는다. 대상 설정은 그대로다. 맨 위 주석 줄은 손으로 쓴 netrc 에 흔한 모양이다(주석이 있어도 계정을 가려야 한다).
  */
 function useAccount(who: Account): void {
-  write(faNetrc, `machine 127.0.0.1 login fa-${who} password fa-${who}\n`)
+  write(faNetrc, `# FTP accounts\nmachine 127.0.0.1 login fa-${who} password fa-${who}\n`)
 }
 
 const W = 'src/main/webapp'
