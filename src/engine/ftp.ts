@@ -27,6 +27,9 @@ export async function resolveAuth(t: Target): Promise<FtpAuth> {
   throw new Stop(`접속 정보 없음: 자격 증명 관리자에 prod-deploy:${t.id} 가 없음 (패널의 대상 설정에서 넣기)`)
 }
 
+/** curl 오류 글자에 비밀번호와 같은 글자가 있을 때 그 글자 대신 내는 문구. */
+const SECRET_HIDDEN = 'curl 오류 글자에 비밀번호와 같은 글자가 있어 숨김'
+
 const quote = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
 
 /** URL 경로: 조각마다 인코딩(공백·한글·# 등). `/` 는 그대로. */
@@ -75,15 +78,19 @@ export class Ftp {
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
     // stderr 는 여기서 한 번만 가리고, 로그와 호출자(목록·접속 확인·멈춤 문구·패널)가 모두 가린 글자를 쓴다.
     const err = this.hideSecret(r.err)
-    // 종료 코드는 가린 글자와 따로 적는다: 짧은 비밀번호를 가리다 오류 글자 속 숫자가 지워져도 코드는 보이게.
+    // 종료 코드는 가린 글자와 따로 적는다: 오류 글자를 통째로 숨겨도 코드는 보이게.
     if (r.code !== 0 && err.trim()) this.log(`curl 종료 ${r.code}: ${err.trim()}`)
     return { ok: r.code === 0, code: r.code, out: r.out, err }
   }
 
-  /** curl stderr 를 밖으로 내기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가리고, 비밀번호 값이 섞여 있으면 그것도 가린다. */
+  /**
+   * curl stderr 를 밖으로 내기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가린다. 그 밖에 비밀번호와 같은 글자가 보이면 그
+   * 자리만 가리지 않고 stderr 전체를 정해 둔 문구로 바꾼다(짧은 비밀번호는 가린 자리의 앞뒤 글자로 짐작할 수 있어서).
+   * 그러면 접속 확인 패널은 오류 줄 없이 종료 코드만으로 문구를 고른다.
+   */
   private hideSecret(s: string): string {
     const masked = s.replace(/^> PASS [^\r\n]*/gm, '> PASS ***')
-    return this.auth.password ? masked.split(this.auth.password).join('***') : masked
+    return this.auth.password && masked.includes(this.auth.password) ? SECRET_HIDDEN : masked
   }
 
   /** 폴더 목록 한 번: 성공이면 이름들, 실패면 curl 종료 코드. 같은 실행 안에서는 다시 묻지 않는다. */

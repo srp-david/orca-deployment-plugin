@@ -454,7 +454,8 @@ test('curl 오류: 가린 글자를 로그·Stop 문구·probe 반환·패널 �
   const all = [...got.logs, got.probe, got.stop, got.verdict]
   assert.ok(got.logs.length > 0 && got.stop && got.verdict, JSON.stringify({ ...got, logs: got.logs.length }))
   for (const s of all) assert.ok(!s.includes(secret), '비밀번호가 남음')
-  assert.match(got.verdict, /curl: \(56\)/, '오류 줄 자체는 패널에 보임')
+  // 오류 줄에 비밀번호가 섞였으니 오류 글자는 통째로 숨기고, 패널은 종료 코드로 고른 문구
+  assert.match(got.verdict, /\[curl 56\]$/)
   assert.match(got.stop, /curl 56/)
 })
 
