@@ -759,6 +759,74 @@ async function accountScenarios(): Promise<void> {
     assert.equal(faText('x', 'f.txt'), 'fa base\n')
     assert.equal(faText('y', 'f.txt'), 'fa B\n', '다른 계정의 홈은 그대로')
   })
+
+  // 여기부터 X 의 홈은 fa base, Y 의 홈은 fa B.
+  write(`${repo}/fa-web/f.txt`, 'fa C\n')
+  gitc('commit', '-q', '-am', 'fa C')
+  gitc('push', '-q')
+  const faC = gitc('rev-parse', 'HEAD')
+  const mark = (id: string) => readFileSync(`${tmp}/runs-fa/${id}/upload.account`, 'utf8').trim()
+  const netrcCopies = () => readdirSync(tmpdir()).filter((n) => n.startsWith('pd-netrc-')).sort()
+
+  await step('업로드 도중 netrc 가 바뀌어도 그 업로드는 시작할 때의 계정으로 보내고, 지문도 그 계정', async () => {
+    const { upload } = await import('../src/engine/steps.ts')
+    useAccount('x')
+    const p = cli('plan', '--target', 'fa', `${faBase}..${faC}`)
+    assert.equal(p.code, 0, p.out)
+    const r = runOf(p.out)
+    const c = codeOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    const before = netrcCopies()
+    let switched = false
+    try {
+      await upload(r, c, true, {
+        say: (s) => {
+          // 업로드 시작을 알린 바로 뒤(파일을 보내기 전)에 계정을 바꾼다.
+          if (s.startsWith('업로드 시작')) {
+            useAccount('y')
+            switched = true
+          }
+        }
+      })
+    } finally {
+      useAccount('x')
+    }
+    assert.ok(switched, '업로드 시작 알림이 있어야 함')
+    assert.equal(faText('x', 'f.txt'), 'fa C\n', '시작할 때의 계정(X)의 홈에 올라감')
+    assert.equal(faText('y', 'f.txt'), 'fa B\n', '바꾼 계정(Y)의 홈은 그대로')
+    assert.equal(mark(r), mark(ra), '지문도 X')
+    assert.deepEqual(netrcCopies(), before, 'netrc 사본은 끝나면 지워짐')
+    for (const f of readdirSync(`${tmp}/runs-fa/${r}`)) assert.ok(!/netrc/i.test(f), `run 기록에 netrc 사본 없음: ${f}`)
+  })
+
+  write(`${repo}/fa-web/f.txt`, 'fa D\n')
+  gitc('commit', '-q', '-am', 'fa D')
+  gitc('push', '-q')
+  const faD = gitc('rev-parse', 'HEAD')
+  // 앞 단계와 상관없이 X 의 홈 = fa C(D 의 직전 커밋)
+  write(faFile('x', 'f.txt'), 'fa C\n')
+
+  await step('계정 지문을 쓰지 못하면 업로드를 시작하지 않고, 원인을 치우면 같은 run 을 다시 올림', () => {
+    useAccount('x')
+    const p = cli('plan', '--target', 'fa', faD)
+    assert.equal(p.code, 0, p.out)
+    const r = runOf(p.out)
+    const c = codeOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    const dir = `${tmp}/runs-fa/${r}`
+    // upload.account 자리에 폴더를 두어 그 파일 쓰기만 실패시킨다.
+    mkdirSync(`${dir}/upload.account`)
+    const failed = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(failed.code, 1, failed.out)
+    assert.equal(existsSync(`${dir}/upload.started`), false, 'upload.started 없음')
+    assert.doesNotMatch(readFileSync(`${dir}/deploy.log`, 'utf8'), /업로드 시작/)
+    assert.equal(faText('x', 'f.txt'), 'fa C\n', '아무것도 보내지 않음')
+    rmSync(`${dir}/upload.account`, { recursive: true })
+    const again = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(again.code, 0, again.out)
+    assert.equal(faText('x', 'f.txt'), 'fa D\n')
+    assert.equal(mark(r), mark(ra))
+  })
 }
 
 main().then(
