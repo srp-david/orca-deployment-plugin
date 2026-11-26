@@ -60,6 +60,21 @@ const codeOf = (out: string) => /확인 코드: ([0-9a-f]{8})/.exec(out)?.[1] ??
 const ftpFile = (p: string) => join(ftpRoot, 'app', p)
 const ftpText = (p: string) => (existsSync(ftpFile(p)) ? readFileSync(ftpFile(p), 'utf8') : null)
 
+// 계정 바꾸기 시나리오(대상 fa): 같은 호스트·포트에 FTP 계정 둘(fa-x, fa-y). 계정마다 홈(chroot)이 따로라 같은 운영 경로가
+// 다른 파일이다. 기존 단계의 시험 FTP 계정(test, ftpRoot)·run 기록 폴더(runs)와 겹치지 않는다.
+type Account = 'x' | 'y'
+const faHome = (who: Account) => `${tmp}/ftp-fa-${who}`
+const faFile = (who: Account, p: string) => join(faHome(who), 'site', p)
+const faText = (who: Account, p: string) => (existsSync(faFile(who, p)) ? readFileSync(faFile(who, p), 'utf8') : null)
+const faNetrc = `${tmp}/netrc-fa`
+/**
+ * 대상 fa 가 접속할 계정을 바꾼다. 자격 증명 관리자에서 계정을 바꾸는 것처럼, 같은 자리(대상의 netrc 파일)에 다른 사용자를
+ * 적는다. 대상 설정은 그대로다.
+ */
+function useAccount(who: Account): void {
+  write(faNetrc, `machine 127.0.0.1 login fa-${who} password fa-${who}\n`)
+}
+
 const W = 'src/main/webapp'
 const C = 'build/classes/java/main/com/x'
 
@@ -137,7 +152,10 @@ async function main(): Promise<void> {
   // 서버 출력은 파일로 바로: 파이프로 받으면 spawnSync 동안 못 읽어 파이프가 차고 서버가 멈춘다.
   const logFile = `${tmp}/ftp-server.log`
   const fd = openSync(logFile, 'w')
-  const server = spawn(PY, ['-I', join(ROOT, 'test', 'ftp-server.py'), ftpRoot, String(PORT)], { stdio: ['ignore', fd, fd] })
+  const accounts = (['x', 'y'] as const).flatMap((who) => [`fa-${who}`, `fa-${who}`, faHome(who)])
+  const server = spawn(PY, ['-I', join(ROOT, 'test', 'ftp-server.py'), ftpRoot, String(PORT), 'test', 'test', ...accounts], {
+    stdio: ['ignore', fd, fd]
+  })
   let exited: number | null = null
   server.on('exit', (c) => (exited = c ?? -1))
   for (let i = 0; ; i++) {
@@ -149,6 +167,7 @@ async function main(): Promise<void> {
 
   try {
     await scenarios(tip1)
+    await accountScenarios()
   } finally {
     server.kill()
   }
@@ -640,6 +659,93 @@ async function scenarios(tip1: string): Promise<void> {
     assert.equal(existsSync(`${dir}/backup`), false)
     assert.ok(existsSync(`${dir}/plan.tsv`), 'run 기록은 남음')
     assert.match(cli('show', id).out, /백업 지움/)
+  })
+}
+
+/**
+ * 같은 대상에서 FTP 계정만 chroot 가 다른 계정으로 바꾼 경우. 계정 X 로 run A, 계정 Y 로 run B 가 같은 운영 경로의 파일 f 를
+ * 올리지만, 두 계정의 홈이 달라 실제로는 다른 파일이다.
+ */
+async function accountScenarios(): Promise<void> {
+  // 앞 단계가 다른 곳에서 main 에 커밋을 하나 넣었다: 받아 둔다.
+  gitc('pull', '-q', '--ff-only')
+  write(`${repo}/fa-web/f.txt`, 'fa base\n')
+  gitc('add', '-A')
+  gitc('commit', '-q', '-m', 'fa base')
+  const faBase = gitc('rev-parse', 'HEAD')
+  write(`${repo}/fa-web/f.txt`, 'fa A\n')
+  gitc('commit', '-q', '-am', 'fa A')
+  gitc('push', '-q')
+  const faA = gitc('rev-parse', 'HEAD')
+  // 두 계정의 운영 = fa base 상태
+  for (const who of ['x', 'y'] as const) write(faFile(who, 'f.txt'), 'fa base\n')
+  write(
+    `${HOME}/targets/fa.json`,
+    JSON.stringify({
+      id: 'fa',
+      label: 'FA (e2e, 계정 바꾸기)',
+      test: true,
+      repo,
+      runs: `${tmp}/runs-fa`,
+      connection: { protocol: 'ftp', host: '127.0.0.1', port: PORT, root: '/site', passive: true },
+      legacyNetrc: faNetrc,
+      mappings: [{ local: 'fa-web', remote: '/' }]
+    })
+  )
+
+  let ra = ''
+  let ca = ''
+  let rb = ''
+  await step('계정 바꾸기: X 로 run A, Y 로 run B 가 각자의 홈에 같은 경로의 파일을 올림', () => {
+    useAccount('x')
+    const pa = cli('plan', '--target', 'fa', faA)
+    assert.equal(pa.code, 0, pa.out)
+    ra = runOf(pa.out)
+    ca = codeOf(pa.out)
+    assert.equal(cli('backup', ra).code, 0)
+    const ua = cli('upload', ra, '--plan', ca, '--yes')
+    assert.equal(ua.code, 0, ua.out)
+    assert.equal(faText('x', 'f.txt'), 'fa A\n')
+    assert.equal(faText('y', 'f.txt'), 'fa base\n')
+    // 같은 파일 f 를 바꾼 커밋 B. Y 의 홈에는 A 가 올라가지 않았다: base 부터 B 까지를 한 plan 으로.
+    write(`${repo}/fa-web/f.txt`, 'fa B\n')
+    gitc('commit', '-q', '-am', 'fa B')
+    gitc('push', '-q')
+    const faB = gitc('rev-parse', 'HEAD')
+    useAccount('y')
+    const pb = cli('plan', '--target', 'fa', `${faBase}..${faB}`)
+    assert.equal(pb.code, 0, pb.out)
+    rb = runOf(pb.out)
+    const cb = codeOf(pb.out)
+    assert.equal(cli('backup', rb).code, 0)
+    const ub = cli('upload', rb, '--plan', cb, '--yes')
+    assert.equal(ub.code, 0, ub.out)
+    assert.equal(faText('y', 'f.txt'), 'fa B\n')
+    assert.equal(faText('x', 'f.txt'), 'fa A\n')
+    // 둘 다 100일 넘게 전에 올린 것으로: B 가 A 보다 나중.
+    const ago = (days: number) => `x\n${Date.now() - days * 24 * 60 * 60 * 1000}\n`
+    writeFileSync(`${tmp}/runs-fa/${ra}/upload.started`, ago(101))
+    writeFileSync(`${tmp}/runs-fa/${rb}/upload.started`, ago(100))
+  })
+
+  await step('백업 정리: 다른 계정의 나중 업로드가 이 계정으로 올린 run 의 보호를 풀지 않음', () => {
+    const r = cli('prune', '--target', 'fa', '--json')
+    assert.equal(r.code, 0, r.out)
+    const p = JSON.parse(r.out) as { items: { id: string }[]; keptLatest: string[] }
+    const listed = p.items.map((x) => x.id)
+    // A 는 X 의 홈에서, B 는 Y 의 홈에서 f 를 마지막으로 올린 run 이다.
+    assert.ok(!listed.includes(ra), `A(${ra}) 가 지울 목록에 있음: [${listed.join(', ')}] / 남김: [${p.keptLatest.join(', ')}]`)
+    assert.ok(!listed.includes(rb), `B(${rb}) 가 지울 목록에 있음: [${listed.join(', ')}]`)
+    assert.deepEqual([...p.keptLatest].sort(), [ra, rb].sort())
+    assert.ok(existsSync(`${tmp}/runs-fa/${ra}/backup`), '목록만 보고는 지우지 않음')
+  })
+
+  await step('되돌리기: 다른 계정의 나중 run 은 이 계정으로 올린 run 의 되돌리기를 막지 않음', () => {
+    useAccount('x')
+    const r = cli('rollback', ra, '--plan', ca, '--yes')
+    assert.equal(r.code, 0, r.out)
+    assert.equal(faText('x', 'f.txt'), 'fa base\n')
+    assert.equal(faText('y', 'f.txt'), 'fa B\n', '다른 계정의 홈은 그대로')
   })
 }
 
