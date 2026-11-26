@@ -109,6 +109,8 @@ export function parseNetrc(input: Buffer | string, host: string, name: string): 
         while (p < line.length && line[p] !== ' ' && line[p] !== '\t') tok += line[p++]
         if (tok.includes('"')) fail(n, '낱말 가운데에 따옴표가 있음')
       }
+      // 이스케이프를 푼 최종 값에도 제어 문자(탭 포함)가 없어야 한다(따옴표 안 \ 뒤의 실제 탭 등).
+      if (/[\x00-\x1f\x7f-\x9f]/.test(tok)) fail(n, '값에 제어 문자(탭 포함)가 있음')
 
       if (macroLine) fail(n, 'macdef 줄에 이름 밖의 낱말이 있음')
       if (want === 'host') {
