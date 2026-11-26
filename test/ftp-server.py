@@ -55,8 +55,8 @@ def main():
     handler.abstracted_fs = ReplacingFS
     handler.banner = "prod-deploy test ftp"
     server = FTPServer(("127.0.0.1", port), handler)
-    homes = " ".join(f"{u}={home}" for u, _, home in accounts)
-    print(f"ready ftp://127.0.0.1:{port} {homes}", flush=True)
+    # 계정 이름·홈은 적지 않는다(시험 계정은 이름과 비밀번호가 같기도 하다): 주소와 계정 수만.
+    print(f"ready ftp://127.0.0.1:{port} accounts={len(accounts)}", flush=True)
     server.serve_forever()
 
 
