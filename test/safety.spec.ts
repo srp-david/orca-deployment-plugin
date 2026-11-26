@@ -463,6 +463,19 @@ test('curl 오류: 짧은 비밀번호를 가려도 로그에 curl 종료 코드
   assert.ok(got.logs.some((l) => /curl 종료 55:/.test(l)), JSON.stringify(got.logs))
 })
 
+test('curl 오류: 비밀번호와 같은 글자가 오류 글자에 있으면 조각을 남기지 않고 통째로 숨기고, 종료 코드는 보인다 (Claude 검토 1)', () => {
+  // 비밀번호 3 은 서버 응답 530 의 한 글자다: 그 자리만 가리면 5***0 처럼 남아 값을 짐작할 수 있다.
+  const got = fakeCurl('3', 'curl: (67) Access denied: 530\n', 67)
+  const all = [...got.logs, got.probe, got.stop, got.verdict]
+  for (const s of all) {
+    assert.ok(!s.includes('530'), `원문이 남음: ${s}`)
+    assert.ok(!s.includes('***'), `가린 자리 조각이 남음: ${s}`)
+  }
+  assert.ok(got.logs.some((l) => /^curl 종료 67: /.test(l)), JSON.stringify(got.logs))
+  assert.match(got.stop, /curl 67/)
+  assert.match(got.verdict, /^로그인 실패 .*\[curl 67\]$/, '패널은 종료 코드로 고른 문구')
+})
+
 test('접속 정보: 사용자 이름에 콜론이 있으면 자격 증명 관리자·netrc 어느 쪽이든 멈춘다(값은 문구에 없음). 비밀번호의 콜론은 된다 (재검토 3-2)', async () => {
   const { parseNetrc } = await import('../src/engine/netrc.ts')
   // 자격 증명 관리자에서 읽은 값
