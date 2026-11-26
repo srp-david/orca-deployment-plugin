@@ -7,13 +7,13 @@ import { sha256 } from './util.ts'
 
 /**
  * 계정 지문 = sha256("prod-deploy account\n" + 호스트(소문자) + ":" + 포트 + "\n" + 사용자 이름) 앞 16자.
- * 사용자 이름은 resolveAuth 가 돌려준, curl 로 실제로 보내는 값이다(자격 증명 관리자든 netrc 든). 앞뒤 공백만 빼고 글자
- * 그대로 쓴다(대소문자 구분).
+ * 사용자 이름은 resolveAuth 가 돌려준, curl 로 실제로 보내는 값이다(자격 증명 관리자든 netrc 든). 공백도 빼지 않고 글자
+ * 그대로 쓴다(대소문자 구분): "team" 과 "team " 은 서버에서 다른 계정일 수 있다.
  */
 export function accountMark(t: Target, auth: FtpAuth): string {
   const host = t.connection.host.toLowerCase()
   const port = t.connection.port ?? 21
-  return sha256(`prod-deploy account\n${host}:${port}\n${auth.user.trim()}`).slice(0, 16)
+  return sha256(`prod-deploy account\n${host}:${port}\n${auth.user}`).slice(0, 16)
 }
 
 /**
