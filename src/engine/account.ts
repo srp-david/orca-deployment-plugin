@@ -8,39 +8,121 @@ import type { FtpAuth } from './ftp.ts'
 import type { Target } from './target.ts'
 import { sha256 } from './util.ts'
 
-/** netrc 에서 그 호스트 항목(machine <호스트>)의 login 만 읽는다. 비밀번호 칸은 보지 않는다. 없으면 null. */
-function netrcLogin(file: string, host: string): string | null {
+// netrc 는 curl 이 읽는 뜻 그대로 읽는다(접속은 curl 이 그 파일로 한다). 엔진은 PATH 의 첫 curl 을 쓰므로, 이 PC 의 두 curl
+// (Git for Windows 의 8.19.0, Windows 기본 System32 의 8.21.0)에 여러 모양의 netrc 를 주고 실제로 보내는 USER 를
+// `curl -v` 로 보아 맞췄다.
+// 두 판이 같게 읽는 것:
+// - 줄 머리(앞 공백 뒤)의 # 는 그 줄 끝까지 주석이다. 줄 가운데의 # 는 보통 낱말이다.
+// - 큰따옴표 값: 안의 공백도 값이고, \ 는 다음 글자를 그대로 넣는다(\n·\r·\t 는 제어 문자라 curl 이 오류로 멈춤). 닫지 않으면 오류.
+// - 키워드(machine·default·login·password·macdef)와 호스트는 대소문자를 무시한다. login 값은 글자 그대로다.
+// - login·password 다음 낱말은 그 값이다(비밀번호 값을 키워드로 읽지 않는다). 한 항목에서 login 이 두 번이면 뒤 것.
+// - 항목 밖의 macdef 는 다음 줄부터 빈 줄(공백만 있는 줄도)까지가 본문이라 읽지 않는다.
+// - 앞에 맞는 machine 이 없으면 default 항목을 쓴다. 같은 호스트 항목이 둘이면 login·password 가 다 있는 앞 항목.
+// 두 판이 다르게 읽는 것(그래서 두 해석을 함께 지문에 넣는다, ADR 0006 "계정 지문의 한계"):
+// - 8.19 는 login·password 를 다 찾으면 바로 멈춘다. 8.21 은 다음 machine·default·macdef 까지 읽고 뒤 값으로 바꾼다.
+// - password 없이 다음 machine·default 를 만나면 8.19 는 찾은 login 을 버리고 이어 찾고, 8.21 은 거기서 멈춘다.
+// - 항목 안의 macdef 는 8.19 가 모르는 낱말로 넘기고, 8.21 은 매크로로 읽어 그 항목을 버린다.
+// - account 는 8.21 만 키워드로 알아 다음 낱말을 값으로 먹는다. macdef 줄의 빈 값("")은 8.19 에서 매크로를 끝낸다.
+
+type CurlVersion = '8.19' | '8.21'
+const BLANK = /[ \t\r\n\f\v]/
+
+/** 한 줄을 curl 처럼 낱말로 나눈다. 줄 머리 # 면 빈 목록, 따옴표를 닫지 않았으면 null(curl 오류). */
+function lineTokens(line: string): string[] | null {
+  const out: string[] = []
+  let i = 0
+  while (i < line.length) {
+    while (i < line.length && BLANK.test(line[i])) i++
+    if (i >= line.length) break
+    if (out.length === 0 && line[i] === '#') break
+    let s = ''
+    if (line[i] === '"') {
+      let closed = false
+      for (i++; i < line.length; ) {
+        const c = line[i++]
+        if (c === '"') {
+          closed = true
+          break
+        }
+        if (c === '\\') {
+          if (i >= line.length) return null
+          const e = line[i++]
+          s += e === 'n' ? '\n' : e === 'r' ? '\r' : e === 't' ? '\t' : e
+        } else s += c
+      }
+      if (!closed) return null
+    } else while (i < line.length && !BLANK.test(line[i])) s += line[i++]
+    out.push(s)
+  }
+  return out
+}
+
+/** 그 curl 판이 그 호스트에 쓸 login. 찾지 못하거나 curl 이 오류로 멈출 모양이면 null. 비밀번호 값은 오류 확인에만 쓴다. */
+function curlLogin(text: string, host: string, v: CurlVersion): string | null {
+  let state: 'none' | 'macdef' | 'hostfound' | 'hostvalid' = 'none'
+  let login: string | null = null
+  let password: string | null = null
+  let key: 'login' | 'password' | 'account' | null = null
+  const result = () => ([login, password].some((x) => x !== null && /[\x00-\x1f\x7f]/.test(x)) ? null : login || null)
+  for (const line of text.split('\n')) {
+    if (state === 'macdef') {
+      if (!line.trim()) state = 'none'
+      continue
+    }
+    const toks = lineTokens(line)
+    if (!toks) return null
+    for (const tok of toks) {
+      const word = tok.toLowerCase()
+      if (v === '8.19' && state === 'hostvalid' && login && password) return result()
+      if (state === 'none') {
+        if (word === 'macdef') state = 'macdef'
+        else if (word === 'machine') state = 'hostfound'
+        else if (word === 'default') state = 'hostvalid'
+      } else if (state === 'macdef') {
+        if (v === '8.19' && tok === '') state = 'none'
+      } else if (state === 'hostfound') state = word === host ? 'hostvalid' : 'none'
+      else if (key) {
+        if (key === 'login') login = tok
+        else if (key === 'password') password = tok
+        key = null
+      } else if (word === 'login' || word === 'password' || (v === '8.21' && word === 'account')) key = word
+      else if (word === 'machine' || word === 'default' || (v === '8.21' && word === 'macdef')) {
+        if (v === '8.19' ? password !== null : login !== null || password !== null) return result()
+        login = null
+        password = null
+        state = word === 'machine' ? 'hostfound' : word === 'default' ? 'hostvalid' : 'macdef'
+      }
+    }
+  }
+  return result()
+}
+
+/**
+ * netrc 에서 curl 이 그 호스트에 쓸 사용자 이름(앞뒤 공백 뺌). 못 찾으면 null.
+ * 두 curl 판의 해석이 다르면 둘을 함께 적은 글자를 돌려준다: 같은 내용이면 같은 글자, login 을 바꾸면 달라진다.
+ */
+function netrcUser(file: string, host: string): string | null {
   let text: string
   try {
     text = readFileSync(file, 'utf8')
   } catch {
     return null
   }
-  // 낱말을 "이름 값" 짝으로 읽는다(default 만 값이 없다): 비밀번호 값이 login 같은 낱말이어도 이름으로 읽지 않게.
-  const tok = text.split(/\s+/).filter(Boolean)
-  let mine = false
-  for (let i = 0; i < tok.length; i++) {
-    const key = tok[i]
-    if (key === 'default') {
-      mine = false
-      continue
-    }
-    const value = tok[++i] ?? ''
-    if (key === 'machine') mine = value.toLowerCase() === host
-    else if (mine && key === 'login' && value) return value
-  }
-  return null
+  const [a, b] = (['8.19', '8.21'] as const).map((v) => curlLogin(text, host, v)?.trim() || null)
+  if (a === b) return a
+  return `netrc curl 8.19=${JSON.stringify(a)} 8.21=${JSON.stringify(b)}`
 }
 
 /**
  * 계정 지문 = sha256("prod-deploy account\n" + 호스트(소문자) + ":" + 포트 + "\n" + 사용자 이름) 앞 16자.
- * 사용자 이름은 resolveAuth 가 돌려준 접속 정보에서: 자격 증명 관리자면 그 사용자, netrc 면 대상 호스트의 login.
+ * 사용자 이름은 resolveAuth 가 돌려준 접속 정보에서: 자격 증명 관리자면 그 사용자, netrc 면 curl 이 대상 호스트에 쓸 login.
+ * 앞뒤 공백만 빼고 글자 그대로 쓴다(대소문자 구분).
  * netrc 에서 이름을 찾지 못하면 "netrc:<경로>" 로 대신한다(같은 파일이면 같은 계정으로 본다).
  */
 export function accountMark(t: Target, auth: FtpAuth, netrcName = auth.kind === 'netrc' ? auth.file : ''): string {
   const host = t.connection.host.toLowerCase()
   const port = t.connection.port ?? 21
-  const user = auth.kind === 'user' ? auth.user : (netrcLogin(auth.file, host) ?? `netrc:${netrcName}`)
+  const user = auth.kind === 'user' ? auth.user.trim() : (netrcUser(auth.file, host) ?? `netrc:${netrcName}`)
   return sha256(`prod-deploy account\n${host}:${port}\n${user}`).slice(0, 16)
 }
 
