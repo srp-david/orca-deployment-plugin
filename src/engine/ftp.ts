@@ -73,11 +73,13 @@ export class Ftp {
     common.push('-K', '-')
     const input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
-    if (r.code !== 0 && r.err.trim()) this.log(`curl: ${this.hideSecret(r.err).trim()}`)
-    return { ok: r.code === 0, code: r.code, out: r.out, err: r.err }
+    // stderr 는 여기서 한 번만 가리고, 로그와 호출자(목록·접속 확인·멈춤 문구·패널)가 모두 가린 글자를 쓴다.
+    const err = this.hideSecret(r.err)
+    if (r.code !== 0 && err.trim()) this.log(`curl: ${err.trim()}`)
+    return { ok: r.code === 0, code: r.code, out: r.out, err }
   }
 
-  /** 로그에 남기기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가리고, 비밀번호 값이 섞여 있으면 그것도 가린다. */
+  /** curl stderr 를 밖으로 내기 전에: PASS 줄은 앱 verbose 와 상관없이 늘 가리고, 비밀번호 값이 섞여 있으면 그것도 가린다. */
   private hideSecret(s: string): string {
     const masked = s.replace(/^> PASS [^\r\n]*/gm, '> PASS ***')
     return this.auth.password ? masked.split(this.auth.password).join('***') : masked
