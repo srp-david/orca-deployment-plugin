@@ -2,6 +2,7 @@
 // 빼는 run: 부분 업로드, 업로드 시각을 모르는 run, 어느 운영 파일이든 그 파일을 마지막으로 올린 run.
 import { lstatSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { sameAccount } from './account.ts'
 import { acquireLock, listRuns, openRun, runDirProblem, STATUS_LABEL, type Run, type RunStatus } from './runs.ts'
 import type { Target } from './target.ts'
 import { dateTime, sha256, Stop } from './util.ts'
@@ -108,13 +109,16 @@ export function pruneCode(targetId: string, ids: string[]): string {
 const destKey = (t: Target) => `${t.connection.host.toLowerCase()}:${t.connection.port ?? 21}`
 const fileKey = (run: Run, remote: string) => `${destKey(run.target)}\t${remote}`
 
+/** 운영 파일 하나를 끝까지 올린 업로드: 그 시각과 올린 계정의 지문(없으면 null). */
+type FileUpload = { at: number; account: string | null }
+
 /**
- * 운영 파일마다, 모든 줄을 끝까지 올린 업로드(업로드됨·대조됨) 중 가장 나중 업로드 시각.
+ * 운영 파일마다, 모든 줄을 끝까지 올린 업로드(업로드됨·대조됨)의 시각과 계정.
  * 부분 업로드는 "나중"으로 치지 않는다: 어느 줄이 실제로 올라갔는지 믿을 수 없고, 곧 되돌릴 상태라 되돌리면 앞 run 이
  * 다시 마지막이 된다. 업로드 시각을 모르는 run 도 치지 않는다. 둘 다 앞 run 이 마지막으로 남아 백업을 지우지 않는 쪽이다.
  */
-function latestUploads(runs: Run[]): Map<string, number> {
-  const latest = new Map<string, number>()
+function fileUploads(runs: Run[]): Map<string, FileUpload[]> {
+  const uploads = new Map<string, FileUpload[]>()
   for (const r of runs) {
     const s = r.status()
     if (s !== 'uploaded' && s !== 'verified') continue
@@ -124,22 +128,36 @@ function latestUploads(runs: Run[]): Map<string, number> {
     if (runDirProblem(r)) continue
     const at = r.uploadAt()
     if (typeof at !== 'number') continue
+    const account = r.account()
     for (const row of r.plan()) {
       const k = fileKey(r, row.remote)
-      if ((latest.get(k) ?? -Infinity) < at) latest.set(k, at)
+      const list = uploads.get(k)
+      if (list) list.push({ at, account })
+      else uploads.set(k, [{ at, account }])
     }
   }
-  return latest
+  return uploads
+}
+
+/**
+ * 이 run 이 올린 운영 파일 하나를, 같은 계정으로 이 run 보다 나중에 올린 run 이 있는가.
+ * 다른 계정(지문이 다름)의 업로드는 세지 않는다: 계정마다 루트(chroot)가 달라 같은 경로라도 다른 파일일 수 있다.
+ * 지문이 없는 run(지문을 남기기 전 기록)은 어느 계정과도 같은 계정으로 본다(sameAccount).
+ */
+function laterSameAccount(uploads: Map<string, FileUpload[]>, run: Run, remote: string, up: number): boolean {
+  const mine = run.account()
+  return (uploads.get(fileKey(run, remote)) ?? []).some((x) => x.at > up && sameAccount(mine, x.account))
 }
 
 /**
  * 대상의 run 중 지금 백업을 지울 수 있는 것. 읽기만 한다.
  * "나중에 올림"은 이 대상의 run 만 본다(되돌리기의 나중 run 판정과 같은 범위). 다른 대상은 같은 호스트·포트·경로라도
  * FTP 계정마다 루트(chroot)가 달라 다른 파일일 수 있고, 이 대상의 잠금 밖에서 올리거나 되돌릴 수 있기 때문이다.
+ * 같은 대상 안에서도 계정 지문(upload.account)이 다른 run 의 업로드는 세지 않는다(같은 까닭, 지문이 없으면 같은 계정).
  */
 export function prunePlan(t: Target, now = Date.now()): PrunePlan {
   const runs = listRuns(t)
-  const latest = latestUploads(runs)
+  const uploads = fileUploads(runs)
   const items: PruneItem[] = []
   const keptLatest: string[] = []
   const keptOther: KeptRun[] = []
@@ -188,8 +206,8 @@ export function prunePlan(t: Target, now = Date.now()): PrunePlan {
       continue
     }
     if (status !== 'rolledBack' && typeof up === 'number') {
-      // 그 파일을 이 run 보다 나중에 올린 run 이 없으면, 이 백업이 그 변경 전 운영본의 유일한 사본일 수 있다.
-      if (run.plan().some((row) => (latest.get(fileKey(run, row.remote)) ?? up) <= up)) {
+      // 그 파일을 같은 계정으로 이 run 보다 나중에 올린 run 이 없으면, 이 백업이 그 변경 전 운영본의 유일한 사본일 수 있다.
+      if (run.plan().some((row) => !laterSameAccount(uploads, run, row.remote, up))) {
         if (unfinished) keepUnfinished('지금 어느 운영 파일을 마지막으로 올린 run 이라 남김')
         else keptLatest.push(run.id)
         continue

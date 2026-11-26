@@ -2,6 +2,7 @@
 // 모두 대상 잠금 안에서 돌고, run 상태 검사도 잠금을 잡은 뒤에 한다. 업로드·되돌리기는 확인 코드가 맞아야 한다.
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { accountMark, sameAccount } from './account.ts'
 import { Ftp, resolveAuth } from './ftp.ts'
 import { git, gitText } from './git.ts'
 import { acquireLock, listRuns, openRun, type PlanRow, type Run } from './runs.ts'
@@ -238,9 +239,12 @@ export async function upload(id: string, code: string, yes: boolean, h: StepHook
     checkBackup(run, h)
     const rows = run.plan()
     const staged = stage(run, rows, h)
-    const ftp = new Ftp(run.target, await resolveAuth(run.target), (s) => run.log(s))
+    const auth = await resolveAuth(run.target)
+    const ftp = new Ftp(run.target, auth, (s) => run.log(s))
     await recheck(run, ftp, h)
     log(`업로드 시작: ${run.target.label} ${rows.length}개 (코드 ${run.code()})`)
+    // 파일을 실제로 올린 계정이 이 run 의 계정이다: 정리·되돌리기가 다른 계정(다른 루트)의 run 과 섞지 않게.
+    run.write('upload.account', `${accountMark(run.target, auth)}\n`)
     run.write('upload.started', `${dateTime()}\n${Date.now()}\n`)
     let n = 0
     for (const [i, r] of rows.entries()) {
@@ -300,6 +304,8 @@ export function laterOverlaps(run: Run): { run: string; files: string[]; unknown
     // 같은 이름이라도 다른 서버(호스트·포트)의 run 은 같은 운영 파일이 아니다(경로는 운영 루트를 포함해 비교).
     const there = destOf(other.target)
     if (there.host !== here.host || there.port !== here.port) continue
+    // 다른 FTP 계정으로 올린 run 도 다른 파일일 수 있다(계정마다 루트가 다름). 지문이 없는 run 은 같은 계정으로 본다.
+    if (!sameAccount(run.account(), other.account())) continue
     const s = other.status()
     if (s !== 'partial' && s !== 'uploaded' && s !== 'verified') continue
     const when = other.uploadAt()

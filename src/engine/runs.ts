@@ -1,6 +1,7 @@
 // run 기록. 폴더 형식은 bash deploy.sh 와 같다(meta.env, plan.tsv, targets.tsv, manual.tsv, skip.tsv,
 // errors.txt, backup/, backup.done, upload.done, deploy.log). 새로 더한 것: target.json(그때 쓴 대상 설정),
-// pr.json, notes.tsv, plan.done, upload.started, verify.done/verify.failed, rollback.done,
+// pr.json, notes.tsv, plan.done, upload.started, upload.account(업로드한 FTP 계정의 지문, account.ts),
+// verify.done/verify.failed, rollback.done,
 // backup.layout(v2 면 운영 파일은 backup/files/ 아래), stage/(업로드할 바이트 고정본), hidden(run 기록 화면에서 숨김),
 // warnings.txt(사람이 보고 판단할 경고. 업로드를 막지 않는다), backup.pruned(백업 정리로 backup/ 을 지움, ADR 0006),
 // backup.pruning(백업 정리가 지우는 중. 끝나면 backup.pruned 로 바뀐다. 남아 있으면 지우다 멈춘 것).
@@ -176,6 +177,11 @@ export class Run {
       return 'unknown'
     }
     return /^\d{2}:\d{2}:\d{2} 업로드 시작/m.test(this.text('deploy.log')) ? 'unknown' : null
+  }
+
+  /** 업로드한 FTP 계정의 지문(upload.account 첫 줄, account.ts). 지문을 남기기 전의 run 이거나 올린 적 없으면 null. */
+  account(): string | null {
+    return this.text('upload.account').split('\n')[0].trim() || null
   }
 
   /** 백업 정리로 백업 파일을 지웠으면 그 시각(글자). 지운 run 은 되돌리기·업로드·다시 백업을 하지 않는다(ADR 0006). */
