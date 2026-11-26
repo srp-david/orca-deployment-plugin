@@ -41,7 +41,8 @@ export function parseNetrc(input: Buffer | string, host: string, name: string): 
   if (typeof input === 'string') text = input
   else {
     // 줄마다 풀어 UTF-8 로 못 읽는 첫 줄의 번호를 준다(0x0a 바이트는 UTF-8 의 여러 바이트 글자 안에 나오지 않는다).
-    const decoder = new TextDecoder('utf-8', { fatal: true })
+    // ignoreBOM: 줄마다 새로 풀어도 줄 머리의 U+FEFF 를 지우지 않는다. BOM 은 아래에서 파일 맨 처음 것만 뺀다.
+    const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
     const parts: string[] = []
     let start = 0
     for (let n = 1; ; n++) {
@@ -56,6 +57,7 @@ export function parseNetrc(input: Buffer | string, host: string, name: string): 
     }
     text = parts.join('\n')
   }
+  // 파일 맨 처음의 BOM 만 뺀다. 그 밖의 U+FEFF 는 값의 글자로 둔다(보낸 이름 그대로 지문을 만든다).
   if (text.startsWith('﻿')) text = text.slice(1)
 
   const entries: Entry[] = []
