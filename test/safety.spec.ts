@@ -365,7 +365,7 @@ test('netrc 읽기: 파일 맨 처음의 BOM 만 빼고, 값 안의 U+FEFF 는 �
   }
 })
 
-test('계정 지문은 보낸 사용자 이름으로만 만든다: 이름이 무엇이든 다른 이름과 겹치지 않고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
+test('계정 지문: curl 판 해석을 섞은 듯한 이름도 그 이름 그대로 지문을 만들고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
   const { accountMark } = await import('../src/engine/account.ts')
   const { parseNetrc } = await import('../src/engine/netrc.ts')
   const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
