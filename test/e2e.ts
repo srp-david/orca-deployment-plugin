@@ -749,12 +749,12 @@ async function accountScenarios(): Promise<void> {
     writeFileSync(`${tmp}/runs-fa/${rb}/upload.started`, ago(100))
   })
 
-  await step('업로드가 계정 지문(upload.account)을 남기고, 사용자 이름·비밀번호는 run 기록에 남기지 않음', () => {
+  await step('업로드가 계정 지문(upload.account)을 남기고, 사용자 이름은 run 기록에 남기지 않음', () => {
     const mark = (id: string) => readFileSync(`${tmp}/runs-fa/${id}/upload.account`, 'utf8').trim()
     assert.match(mark(ra), /^[0-9a-f]{16}$/)
     assert.match(mark(rb), /^[0-9a-f]{16}$/)
     assert.notEqual(mark(ra), mark(rb), '계정이 다르면 지문이 다름')
-    // run 폴더의 어느 파일에도 계정 이름(비밀번호와 같은 값)이 그대로 들어가지 않는다.
+    // run 폴더의 어느 파일에도 계정 이름이 그대로 들어가지 않는다(비밀번호는 마지막 비노출 단계가 따로 본다).
     const files = (dir: string): string[] =>
       readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]))
     for (const id of [ra, rb])
