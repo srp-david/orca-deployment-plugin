@@ -365,6 +365,76 @@ test('계정 지문: 업로드에 고정한 netrc 사본은 OS 임시 폴더에 
   other.release()
 })
 
+test('netrc 읽기: 엔진이 대상 호스트의 login·password 를 정한다(주석·따옴표·macdef·default)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const read = (text: string, host = 'ftp.example.com') => parseNetrc(text, host, 'test.netrc')
+  assert.deepEqual(read('machine ftp.example.com login alice password s3cret\n'), { user: 'alice', password: 's3cret' })
+  // 줄 머리 # 주석(항목 안의 주석 줄 포함), 여러 줄 항목, 호스트·키워드 대소문자 무시, CRLF
+  assert.deepEqual(read('# FTP accounts\r\nMACHINE FTP.Example.com\r\n  # 메모\r\n  LOGIN alice\r\n  password p\r\n'), { user: 'alice', password: 'p' })
+  // 큰따옴표 값: 안의 공백과 \ 이스케이프. login fa-x 와 login "fa-x" 는 같다
+  assert.deepEqual(read('machine ftp.example.com login "fa-x" password "p login first q"\n'), { user: 'fa-x', password: 'p login first q' })
+  assert.deepEqual(read('machine ftp.example.com login "team one" password "a\\"b\\\\c"\n'), { user: 'team one', password: 'a"b\\c' })
+  // 비밀번호 값은 키워드로 읽지 않는다
+  assert.deepEqual(read('machine ftp.example.com password login login alice\n'), { user: 'alice', password: 'login' })
+  // 다른 호스트 항목의 값이 키워드 같은 낱말이어도 값이다(재검토 1)
+  assert.deepEqual(read('machine elsewhere login macdef password p\nmachine ftp.example.com login alice password q\n'), { user: 'alice', password: 'q' })
+  // 항목 밖 macdef 본문(빈 줄·공백만 있는 줄까지)의 가짜 항목은 읽지 않는다. U+00A0 만 있는 줄은 빈 줄이 아니다
+  assert.deepEqual(read('macdef init\nmachine ftp.example.com login evil password e\n  \nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  assert.deepEqual(read('macdef init\n \nmachine ftp.example.com login evil password e\n\nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  assert.deepEqual(read('machine ftp.example.com login alice password p\nmacdef init\ncd /x\n\n'), { user: 'alice', password: 'p' }, '다 적은 항목 뒤의 macdef')
+  // 맞는 machine 이 없으면 default, 둘 다 맞으면 machine
+  assert.deepEqual(read('machine other login o password o\ndefault login dflt password d\n'), { user: 'dflt', password: 'd' })
+  assert.deepEqual(read('default login dflt password d\nmachine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+  // UTF-8 BOM 은 무시한다
+  assert.deepEqual(read('﻿machine ftp.example.com login alice password p\n'), { user: 'alice', password: 'p' })
+})
+
+test('netrc 읽기: 이상한 모양은 고르지 않고 멈춘다(줄 번호와 이유만, 값은 적지 않음)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const secret = 'zz-secret-9d1'
+  const stops = (text: string | Buffer, why: RegExp, host = 'ftp.example.com') =>
+    assert.throws(
+      () => parseNetrc(text, host, 'test.netrc'),
+      (e: Error) => {
+        assert.match(e.message, why)
+        assert.ok(!e.message.includes(secret), `값이 문구에 나옴: ${e.message}`)
+        assert.ok(!e.message.includes('alice'), `값이 문구에 나옴: ${e.message}`)
+        return true
+      }
+    )
+  const ok = `machine ftp.example.com login alice password ${secret}\n`
+  stops(`${ok}machine ftp.example.com login bob password ${secret}\n`, /2행.*둘 이상/)
+  stops(`machine ftp.example.com login alice password ${secret} login bob password q\n`, /1행.*login.*두 번/)
+  stops(`machine ftp.example.com login alice password ${secret}\n password q\n`, /2행.*password.*두 번/)
+  stops(`machine ftp.example.com login alice password ${secret} # 메모\n`, /1행.*모르는 낱말/)
+  stops(`machine ftp.example.com login alice account a password ${secret}\n`, /1행.*모르는 낱말/)
+  stops(`machine ftp.example.com login alice\nmacdef init\n\npassword ${secret}\n`, /2행.*macdef/)
+  stops(`machine ftp.example.com macdef m\n\n${ok}`, /1행.*macdef/)
+  stops(`${ok}machine unrelated login "unfinished\n`, /2행.*따옴표/, 'ftp.example.com')
+  stops(`machine ftp.example.com login "alice\\tx" password ${secret}\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password ${secret}\u0001\n`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password\n`, /1행.*password.*값이 없음/)
+  stops(`machine\n`, /1행.*호스트/)
+  stops(`login alice password ${secret}\n`, /1행.*항목 밖/)
+  stops(`machine other login alice password ${secret}\n`, /ftp\.example\.com.*항목이 없음/)
+  stops(`machine ftp.example.com password ${secret}\n`, /login 이 없음/)
+  stops(`machine ftp.example.com login alice\n`, /password 가 없음/)
+  stops(Buffer.from([...Buffer.from('machine ftp.example.com login al'), 0x81, ...Buffer.from(` password ${secret}\n`)]), /UTF-8/)
+})
+
+test('계정 지문은 보낸 사용자 이름으로만 만든다: 이름이 무엇이든 다른 이름과 겹치지 않고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
+  const { accountMark } = await import('../src/engine/account.ts')
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
+  const markOf = (text: string) => accountMark(t, { kind: 'user', ...parseNetrc(text, 'ftp.example.com', 'test.netrc') })
+  const odd = 'netrc curl 8.19="alice" 8.21="bob"'
+  const oddMark = markOf(`machine ftp.example.com login "netrc curl 8.19=\\"alice\\" 8.21=\\"bob\\"" password p\n`)
+  assert.equal(oddMark, accountMark(t, { kind: 'user', user: odd, password: 'p' }))
+  assert.notEqual(oddMark, markOf('machine ftp.example.com login alice password p\n'))
+  assert.notEqual(oddMark, markOf('machine ftp.example.com login bob password p\n'))
+  assert.equal(markOf('machine ftp.example.com login alice password one\n'), markOf('# 바꿈\nmachine ftp.example.com login "alice" password "two words"\n'))
+})
+
 test('작업 기록: 프로세스 번호가 다른 프로세스에 다시 쓰여도, beat 가 멈췄으면 끝난 작업으로 본다', async () => {
   const { readJob, writeJob, JobWriter } = await import('../src/engine/jobs.ts')
   const old = Date.now() - 10 * 60000

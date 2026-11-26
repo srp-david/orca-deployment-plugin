@@ -4,6 +4,7 @@
 // 사용법: node test/e2e.ts            (pyftpdlib venv: ~/.prod-deploy/test-ftp/venv)
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -51,9 +52,13 @@ function classBytes(tag: string, name = 'com/x/Foo', fields: FixField[] = []): B
 }
 const hasTag = (p: string, tag: string) => ftpText(p)?.includes(tag) ?? false
 
+/** CLI 출력(stdout·stderr)을 모두 모아 둔다: netrc 비밀번호가 출력에 나오지 않는지 마지막에 본다. */
+const cliOutputs: string[] = []
 function cli(...args: string[]): { code: number; out: string } {
   const r = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, env, encoding: 'utf8' })
-  return { code: r.status ?? -1, out: (r.stdout ?? '') + (r.stderr ?? '') }
+  const out = (r.stdout ?? '') + (r.stderr ?? '')
+  cliOutputs.push(out)
+  return { code: r.status ?? -1, out }
 }
 const runOf = (out: string) => /run: (\S+)/.exec(out)?.[1] ?? ''
 const codeOf = (out: string) => /확인 코드: ([0-9a-f]{8})/.exec(out)?.[1] ?? ''
@@ -67,12 +72,17 @@ const faHome = (who: Account) => `${tmp}/ftp-fa-${who}`
 const faFile = (who: Account, p: string) => join(faHome(who), 'site', p)
 const faText = (who: Account, p: string) => (existsSync(faFile(who, p)) ? readFileSync(faFile(who, p), 'utf8') : null)
 const faNetrc = `${tmp}/netrc-fa`
+/** 시험 계정의 비밀번호. 다른 곳에 나오지 않는 글자라, run 기록·로그·출력에 새어 나오지 않는지 찾을 수 있다. */
+const faPassword = (who: Account) => `pw-${who}-7c1e93d05b`
+/** netrc 에 그 계정 항목 한 줄. */
+const faEntry = (who: Account) => `machine 127.0.0.1 login fa-${who} password ${faPassword(who)}\n`
 /**
- * 대상 fa 가 접속할 계정을 바꾼다. 자격 증명 관리자에서 계정을 바꾸는 것처럼, 같은 자리(대상의 netrc 파일)에 다른 사용자를
- * 적는다. 대상 설정은 그대로다. 맨 위 주석 줄은 손으로 쓴 netrc 에 흔한 모양이다(주석이 있어도 계정을 가려야 한다).
+ * 대상 fa(와 같은 netrc 를 쓰는 대상들)가 접속할 계정을 바꾼다. 자격 증명 관리자에서 계정을 바꾸는 것처럼, 같은 자리(대상의
+ * netrc 파일)에 다른 사용자를 적는다. 대상 설정은 그대로다. 맨 위 주석 줄은 손으로 쓴 netrc 에 흔한 모양이다.
+ * shape 를 주면 그 계정 항목을 둘러싼 netrc 모양을 바꾼다(다른 항목, 깨진 모양 등).
  */
-function useAccount(who: Account): void {
-  write(faNetrc, `# FTP accounts\nmachine 127.0.0.1 login fa-${who} password fa-${who}\n`)
+function useAccount(who: Account, shape: (entry: string) => string = (entry) => `# FTP accounts\n${entry}`): void {
+  write(faNetrc, shape(faEntry(who)))
 }
 
 const W = 'src/main/webapp'
@@ -152,7 +162,7 @@ async function main(): Promise<void> {
   // 서버 출력은 파일로 바로: 파이프로 받으면 spawnSync 동안 못 읽어 파이프가 차고 서버가 멈춘다.
   const logFile = `${tmp}/ftp-server.log`
   const fd = openSync(logFile, 'w')
-  const accounts = (['x', 'y'] as const).flatMap((who) => [`fa-${who}`, `fa-${who}`, faHome(who)])
+  const accounts = (['x', 'y'] as const).flatMap((who) => [`fa-${who}`, faPassword(who), faHome(who)])
   const server = spawn(PY, ['-I', join(ROOT, 'test', 'ftp-server.py'), ftpRoot, String(PORT), 'test', 'test', ...accounts], {
     stdio: ['ignore', fd, fd]
   })
@@ -826,6 +836,114 @@ async function accountScenarios(): Promise<void> {
     assert.equal(again.code, 0, again.out)
     assert.equal(faText('x', 'f.txt'), 'fa D\n')
     assert.equal(mark(r), mark(ra))
+  })
+
+  // 재검토 2: netrc 는 엔진이 읽어 사용자 이름·비밀번호를 정하고, curl 에는 그 값을 넘긴다. 지문은 보낸 사용자 이름으로 만든다.
+  const serverLog = () => readFileSync(`${tmp}/ftp-server.log`, 'utf8')
+  const logins = (who: Account) => serverLog().split(`USER 'fa-${who}' logged in.`).length - 1
+  const markFor = (who: Account) => createHash('sha256').update(`prod-deploy account\n127.0.0.1:${PORT}\nfa-${who}`).digest('hex').slice(0, 16)
+  const markIn = (target: string, id: string) => readFileSync(`${tmp}/runs-${target}/${id}/upload.account`, 'utf8').trim()
+  /** 대상 fa 와 같은 저장소·netrc 를 쓰고 운영 루트·run 기록 폴더만 다른 대상. 두 계정의 홈에 그 시점의 f 를 깔아 둔다. */
+  function sideTarget(id: string, root: string, accounts: Account[]): void {
+    write(
+      `${HOME}/targets/${id}.json`,
+      JSON.stringify({
+        id,
+        label: `${id.toUpperCase()} (e2e)`,
+        test: true,
+        repo,
+        runs: `${tmp}/runs-${id}`,
+        connection: { protocol: 'ftp', host: '127.0.0.1', port: PORT, root, passive: true },
+        legacyNetrc: faNetrc,
+        mappings: [{ local: 'fa-web', remote: '/' }]
+      })
+    )
+    const now = readFileSync(`${repo}/fa-web/f.txt`, 'utf8')
+    for (const who of accounts) write(join(faHome(who), root, 'f.txt'), now)
+  }
+  function commitF(text: string): string {
+    write(`${repo}/fa-web/f.txt`, text)
+    gitc('commit', '-q', '-am', text.trim())
+    gitc('push', '-q')
+    return gitc('rev-parse', 'HEAD')
+  }
+
+  await step('다른 호스트 항목의 login 값이 macdef 여도 대상 항목의 계정으로 보내고, 지문은 보낸 사용자 이름 (재검토 1)', () => {
+    sideTarget('fb', '/site-b', ['x', 'y'])
+    const q = commitF('fb new\n')
+    const shape = (entry: string) => `machine elsewhere login macdef password p\n# FTP accounts\n${entry}`
+    const ids: Partial<Record<Account, string>> = {}
+    for (const who of ['x', 'y'] as const) {
+      const other = who === 'x' ? 'y' : 'x'
+      useAccount(who, shape)
+      const p = cli('plan', '--target', 'fb', q)
+      assert.equal(p.code, 0, p.out)
+      const r = runOf(p.out)
+      assert.equal(cli('backup', r).code, 0)
+      const seen = { [who]: logins(who), [other]: logins(other) }
+      const u = cli('upload', r, '--plan', codeOf(p.out), '--yes')
+      assert.equal(u.code, 0, u.out)
+      assert.equal(readFileSync(join(faHome(who), 'site-b', 'f.txt'), 'utf8'), 'fb new\n', '그 계정의 홈에 올라감')
+      assert.ok(logins(who) > seen[who], `시험 FTP 가 fa-${who} 로 로그인을 받음`)
+      assert.equal(logins(other), seen[other], '다른 계정으로는 로그인하지 않음')
+      assert.equal(markIn('fb', r), markFor(who), '지문 = 시험 FTP 가 받은 사용자 이름의 지문')
+      ids[who] = r
+    }
+    const ago = (days: number) => `x\n${Date.now() - days * 24 * 60 * 60 * 1000}\n`
+    writeFileSync(`${tmp}/runs-fb/${ids.x}/upload.started`, ago(101))
+    writeFileSync(`${tmp}/runs-fb/${ids.y}/upload.started`, ago(100))
+    const pr = cli('prune', '--target', 'fb', '--json')
+    assert.equal(pr.code, 0, pr.out)
+    const plan = JSON.parse(pr.out) as { items: { id: string }[]; keptLatest: string[] }
+    assert.ok(!plan.items.some((x) => x.id === ids.x), `A(${ids.x}) 가 지울 목록에 있음`)
+    assert.deepEqual([...plan.keptLatest].sort(), [ids.x, ids.y].sort())
+  })
+
+  await step('이상한 모양의 netrc 는 업로드를 멈추고(줄 번호와 이유만), 지문·업로드 시작 표시를 남기지 않음 (재검토 2·3)', () => {
+    sideTarget('fc', '/site-c', ['x'])
+    const q = commitF('fc new\n')
+    useAccount('x')
+    const p = cli('plan', '--target', 'fc', q)
+    assert.equal(p.code, 0, p.out)
+    const r = runOf(p.out)
+    const c = codeOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    const dir = `${tmp}/runs-fc/${r}`
+    const strange: [string, (entry: string) => string, RegExp][] = [
+      ['대상 항목 뒤 다른 항목의 닫지 않은 따옴표', (e) => `# FTP accounts\n${e}machine unrelated login "unfinished\n`, /3행.*따옴표/],
+      ['한 항목에 login·password 가 두 번', (e) => e.replace('\n', ` login fa-y password ${faPassword('y')}\n`), /1행.*두 번/],
+      ['대상 호스트 항목이 둘', (e) => `${e}machine 127.0.0.1 login fa-y password ${faPassword('y')}\n`, /2행.*둘 이상/],
+      ['줄 가운데의 # (모르는 낱말)', (e) => e.replace('\n', ' # 메모\n'), /1행.*모르는 낱말/],
+      ['항목 안의 macdef', (e) => `machine 127.0.0.1 login fa-x\nmacdef init\n\n${e}`, /2행.*macdef/]
+    ]
+    for (const [name, shape, why] of strange) {
+      useAccount('x', shape)
+      const u = cli('upload', r, '--plan', c, '--yes')
+      assert.equal(u.code, 1, `${name}: ${u.out}`)
+      assert.match(u.out, why, name)
+      assert.equal(existsSync(`${dir}/upload.account`), false, `${name}: upload.account 없음`)
+      assert.equal(existsSync(`${dir}/upload.started`), false, `${name}: upload.started 없음`)
+      for (const who of ['x', 'y'] as const) assert.ok(!u.out.includes(faPassword(who)), `${name}: 멈춤 문구에 비밀번호 없음`)
+    }
+    assert.equal(readFileSync(join(faHome('x'), 'site-c', 'f.txt'), 'utf8'), 'fb new\n', '아무것도 보내지 않음')
+    // netrc 를 고치면 같은 run 을 올린다
+    useAccount('x')
+    const ok = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(ok.code, 0, ok.out)
+    assert.equal(markIn('fc', r), markFor('x'))
+  })
+
+  await step('netrc 비밀번호는 run 기록·deploy.log·작업 기록·CLI 출력 어디에도 없음 (시험 FTP 로그는 PASS 를 받으므로 뺌)', () => {
+    const files = (d: string): string[] =>
+      existsSync(d) ? readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(d, e.name)) : [join(d, e.name)])) : []
+    const places = [HOME, ...readdirSync(tmp).filter((n) => n.startsWith('runs')).map((n) => join(tmp, n))]
+    const scanned = places.flatMap(files)
+    assert.ok(scanned.some((f) => f.endsWith('deploy.log')), '살펴본 곳에 deploy.log 가 있어야 함')
+    for (const who of ['x', 'y'] as const) {
+      const secret = faPassword(who)
+      for (const f of scanned) assert.ok(!readFileSync(f).includes(secret), `${f} 에 비밀번호`)
+      assert.ok(!cliOutputs.some((o) => o.includes(secret)), 'CLI 출력에 비밀번호')
+    }
   })
 }
 
