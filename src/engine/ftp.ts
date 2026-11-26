@@ -2,18 +2,23 @@
 import { existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { readCredential } from './creds.ts'
+import { readNetrc } from './netrc.ts'
 import { netrcPath, type Target } from './target.ts'
 import { exec, sha256, Stop, toNative } from './util.ts'
 
-export type FtpAuth = { kind: 'user'; user: string; password: string } | { kind: 'netrc'; file: string }
+/** 접속 정보. 자격 증명 관리자든 netrc 든 엔진이 값을 정해 curl 에 stdin 으로 넘긴다(curl 이 netrc 를 따로 읽지 않음). */
+export type FtpAuth = { kind: 'user'; user: string; password: string }
 
-/** 자격 증명 관리자 → 없으면 옮기는 동안의 netrc. 둘 다 없으면 멈춘다. */
+/**
+ * 자격 증명 관리자 → 없으면 옮기는 동안의 netrc. 둘 다 없으면 멈춘다. netrc 는 엔진이 한 번 읽어 대상 호스트의 login·password
+ * 를 정한다(netrc.ts, 이상한 모양이면 멈춤). 그래서 한 작업은 처음 읽은 값으로 끝까지 접속하고, 계정 지문도 보낸 이름으로 만든다.
+ */
 export async function resolveAuth(t: Target): Promise<FtpAuth> {
   const c = await readCredential(t.id)
   if (c) return { kind: 'user', user: c.user, password: c.password }
   const netrc = netrcPath(t)
   if (netrc) {
-    if (existsSync(toNative(netrc))) return { kind: 'netrc', file: toNative(netrc) }
+    if (existsSync(toNative(netrc))) return { kind: 'user', ...readNetrc(toNative(netrc), t.connection.host, netrc) }
     throw new Stop(`접속 정보 없음: 자격 증명 관리자에 prod-deploy:${t.id} 가 없고 ${netrc} 도 없음`)
   }
   throw new Stop(`접속 정보 없음: 자격 증명 관리자에 prod-deploy:${t.id} 가 없음 (패널의 대상 설정에서 넣기)`)
@@ -61,11 +66,8 @@ export class Ftp {
     const verbose = !!process.env.PRODDEPLOY_CURL_VERBOSE
     if (verbose) common.push('-v')
     if (this.t.connection.passive === false) common.push('--ftp-port', '-')
-    let input = ''
-    if (this.auth.kind === 'user') {
-      common.push('-K', '-')
-      input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
-    } else common.push('--netrc-file', this.auth.file)
+    common.push('-K', '-')
+    const input = `user = ${quote(`${this.auth.user}:${this.auth.password}`)}\n`
     const r = await exec('curl', [...common, ...args], { input, timeoutMs: seconds * 2000 })
     if (r.code !== 0 && r.err.trim())
       this.log(`curl: ${verbose ? r.err.replace(/^> PASS .*$/gm, '> PASS ***') : r.err.trim()}`)

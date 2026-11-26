@@ -261,7 +261,7 @@ test('다른 계정(지문)의 나중 run 은 되돌리기를 막지 않고, 같
   assert.deepEqual(laterOverlaps(g).map((x) => x.run), [h.id])
 })
 
-test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀번호와 이름 그대로는 담지 않는다. netrc 는 대상 호스트의 login 만 읽는다', async () => {
+test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀번호와 이름 그대로는 담지 않는다', async () => {
   const { accountMark } = await import('../src/engine/account.ts')
   const t = { ...target, connection: { ...target.connection, host: 'FTP.Example.com', port: 2121 } }
   const want = (user: string) => sha256(`prod-deploy account\nftp.example.com:2121\n${user}`).slice(0, 16)
@@ -271,99 +271,11 @@ test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀
   assert.equal(accountMark(t, { kind: 'user', user: 'alice', password: 'other' }), m, '비밀번호는 지문에 들지 않음')
   assert.notEqual(accountMark(t, { kind: 'user', user: 'bob', password: 'secret' }), m)
   assert.notEqual(accountMark({ ...t, connection: { ...t.connection, port: 21 } }, { kind: 'user', user: 'alice', password: 'secret' }), m)
-  // netrc: 다른 호스트 항목은 건너뛰고, 여러 줄에 걸친 항목도 읽는다(호스트는 대소문자 무시)
-  const netrc = `${tmp}/acc.netrc`
-  writeFileSync(netrc, 'machine other.example login mallory password x\nmachine ftp.example.com\n  login alice\n  password secret\n')
-  assert.equal(accountMark(t, { kind: 'netrc', file: netrc }), want('alice'))
-  // 대상 호스트 항목이 없으면 netrc 경로로 대신한다
-  writeFileSync(netrc, 'machine other.example login mallory password x\n')
-  assert.equal(accountMark(t, { kind: 'netrc', file: netrc }), want(`netrc:${netrc}`))
+  // 앞뒤 공백은 빼고, 대소문자는 그대로
+  assert.equal(accountMark(t, { kind: 'user', user: ' alice ', password: 'x' }), m)
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'Alice', password: 'x' }), m)
 })
 
-test('계정 지문: netrc 는 curl 과 같은 뜻으로 읽는다(주석·따옴표·비밀번호 값·macdef·default)', async () => {
-  const { accountMark } = await import('../src/engine/account.ts')
-  const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
-  const want = (user: string) => sha256(`prod-deploy account\nftp.example.com:2121\n${user}`).slice(0, 16)
-  const netrc = `${tmp}/curl.netrc`
-  const markOf = (text: string) => {
-    writeFileSync(netrc, text)
-    return accountMark(t, { kind: 'netrc', file: netrc })
-  }
-  // 줄 머리 # 주석: 주석이 있는 두 계정은 서로 다른 지문
-  const cx = markOf('# FTP accounts\nmachine ftp.example.com login fa-x password fa-x\n')
-  const cy = markOf('# FTP accounts\nmachine ftp.example.com login fa-y password fa-y\n')
-  assert.equal(cx, want('fa-x'))
-  assert.equal(cy, want('fa-y'))
-  assert.equal(markOf('machine ftp.example.com\n  # login evil\n  login fa-x password p\n'), want('fa-x'), '항목 안의 주석 줄도 무시')
-  // 따옴표: login fa-x 와 login "fa-x" 는 같은 지문, 따옴표 안 \ 이스케이프와 공백
-  assert.equal(markOf('machine ftp.example.com login "fa-x" password "fa-x"\n'), cx)
-  assert.equal(markOf('machine ftp.example.com login "a\\"b\\\\c" password p\n'), want('a"b\\c'))
-  const one = markOf('machine ftp.example.com login "team one" password p\n')
-  const two = markOf('machine ftp.example.com login "team two" password p\n')
-  assert.equal(one, want('team one'))
-  assert.notEqual(one, two, '"team one" 과 "team two" 는 다른 계정')
-  // 비밀번호만 바뀌면 같은 지문: 비밀번호 값(따옴표 안의 낱말 포함)은 login 으로 읽지 않는다
-  const p1 = markOf('machine ftp.example.com password "p login first q" login fa-x\n')
-  const p2 = markOf('machine ftp.example.com password "p login second q" login fa-x\n')
-  assert.equal(p1, want('fa-x'))
-  assert.equal(p2, p1)
-  assert.equal(markOf('machine ftp.example.com login fa-x password login\n'), want('fa-x'), '비밀번호가 login 이라는 낱말이어도')
-  // macdef 본문(빈 줄까지)의 가짜 machine/login 은 무시
-  assert.equal(markOf('macdef init\nmachine ftp.example.com login evil password e\n\nmachine ftp.example.com login fa-x password p\n'), want('fa-x'))
-  assert.equal(markOf('macdef init\r\nmachine ftp.example.com login evil password e\r\n  \r\nmachine ftp.example.com login fa-x password p\r\n'), want('fa-x'), '공백만 있는 줄도 macdef 끝(CRLF 포함)')
-  // default: 맞는 machine 이 없으면 curl 처럼 default 의 login
-  assert.equal(markOf('machine other.example login o password o\ndefault login fa-d password d\n'), want('fa-d'))
-  // 같은 호스트가 둘이면 curl 처럼 앞(login·password 가 다 있는) 항목
-  assert.equal(markOf('machine ftp.example.com login first password p1\nmachine ftp.example.com login second password p2\n'), want('first'))
-  // 앞뒤 공백은 뺀다(대소문자는 그대로)
-  assert.equal(accountMark(t, { kind: 'user', user: ' Alice ', password: 'x' }), want('Alice'))
-  assert.notEqual(want('Alice'), want('alice'))
-})
-
-test('계정 지문: curl 판마다 다르게 읽는 netrc 는 두 해석을 함께 넣는다(같은 내용이면 같은 지문, login 을 바꾸면 다른 지문)', async () => {
-  const { accountMark } = await import('../src/engine/account.ts')
-  const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
-  const want = (user: string) => sha256(`prod-deploy account\nftp.example.com:2121\n${user}`).slice(0, 16)
-  const netrc = `${tmp}/split.netrc`
-  const markOf = (text: string) => {
-    writeFileSync(netrc, text)
-    return accountMark(t, { kind: 'netrc', file: netrc })
-  }
-  // login·password 를 다 찾은 뒤의 낱말: 8.19 는 거기서 멈추고(a), 8.21 은 항목 끝까지 읽어 뒤 login 을 쓴다(b).
-  const split = (a: string, b: string) => `machine ftp.example.com login ${a} password p # login ${b} password q\n`
-  const m1 = markOf(split('fa-x', 'fa-z'))
-  assert.equal(markOf(split('fa-x', 'fa-z')), m1, '같은 내용이면 같은 지문')
-  assert.notEqual(m1, want('fa-x'))
-  assert.notEqual(m1, want('fa-z'))
-  assert.notEqual(markOf(split('fa-y', 'fa-z')), m1, '앞 login 만 바꿔도 다른 지문')
-  assert.notEqual(markOf(split('fa-x', 'fa-w')), m1, '뒤 login 만 바꿔도 다른 지문')
-  // password 없는 같은 호스트 항목 뒤 다른 항목: 8.19 는 뒤 항목(second), 8.21 은 앞 항목(first)
-  const dup = markOf('machine ftp.example.com login first\nmachine ftp.example.com login second password p\n')
-  assert.notEqual(dup, want('first'))
-  assert.notEqual(dup, want('second'))
-})
-
-test('계정 지문: 업로드에 고정한 netrc 사본은 OS 임시 폴더에 두고 release 로 지운다. 이름을 못 찾으면 원래 경로로 대신한다', async () => {
-  const { accountMark, pinAccount } = await import('../src/engine/account.ts')
-  const t = { ...target, connection: { ...target.connection, host: 'ftp.example.com', port: 2121 } }
-  const netrc = `${tmp}/pin.netrc`
-  writeFileSync(netrc, 'machine ftp.example.com login fa-x password p\n')
-  const pinned = pinAccount(t, { kind: 'netrc', file: netrc })
-  assert.equal(pinned.auth.kind, 'netrc')
-  const copy = pinned.auth.kind === 'netrc' ? pinned.auth.file : ''
-  assert.notEqual(copy, netrc)
-  assert.ok(copy.startsWith(tmpdir()), copy)
-  // 사본을 만든 뒤 원래 파일이 바뀌어도 그 업로드의 접속 정보·지문은 사본의 것
-  writeFileSync(netrc, 'machine ftp.example.com login fa-y password p\n')
-  assert.match(readFileSync(copy, 'utf8'), /login fa-x/)
-  assert.equal(pinned.mark, accountMark(t, { kind: 'user', user: 'fa-x', password: '' }))
-  pinned.release()
-  assert.equal(existsSync(copy), false)
-  writeFileSync(netrc, 'machine other.example login o password o\n')
-  const other = pinAccount(t, { kind: 'netrc', file: netrc })
-  assert.equal(other.mark, accountMark(t, { kind: 'netrc', file: netrc }), '대신 쓰는 경로는 원래 netrc 경로')
-  other.release()
-})
 
 test('netrc 읽기: 엔진이 대상 호스트의 login·password 를 정한다(주석·따옴표·macdef·default)', async () => {
   const { parseNetrc } = await import('../src/engine/netrc.ts')

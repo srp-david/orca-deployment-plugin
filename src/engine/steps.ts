@@ -2,7 +2,7 @@
 // 모두 대상 잠금 안에서 돌고, run 상태 검사도 잠금을 잡은 뒤에 한다. 업로드·되돌리기는 확인 코드가 맞아야 한다.
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { pinAccount, sameAccount } from './account.ts'
+import { accountMark, sameAccount } from './account.ts'
 import { Ftp, resolveAuth } from './ftp.ts'
 import { git, gitText } from './git.ts'
 import { acquireLock, listRuns, openRun, type PlanRow, type Run } from './runs.ts'
@@ -239,26 +239,22 @@ export async function upload(id: string, code: string, yes: boolean, h: StepHook
     checkBackup(run, h)
     const rows = run.plan()
     const staged = stage(run, rows, h)
-    // 이 업로드는 지금의 접속 정보로만 보낸다(netrc 는 사본으로 고정, account.ts pinAccount). 지문도 그 접속 정보의 것이다.
-    const pinned = pinAccount(run.target, await resolveAuth(run.target))
+    // 접속 정보는 한 번 읽은 값을 이 업로드 끝까지 쓴다(netrc 도 엔진이 읽어 값으로 넘김): 도중에 바뀌어도 같은 계정으로 보낸다.
+    const auth = await resolveAuth(run.target)
+    const ftp = new Ftp(run.target, auth, (s) => run.log(s))
+    await recheck(run, ftp, h)
+    // 파일을 실제로 올린 계정이 이 run 의 계정이다: 정리·되돌리기가 다른 계정(다른 루트)의 run 과 섞지 않게.
+    // 업로드 시작 표시(로그·upload.started)보다 먼저 쓴다: 쓰지 못하면 보내기 전에 멈추고, 원인을 치운 뒤 같은 run 을 다시 올린다.
+    run.write('upload.account', `${accountMark(run.target, auth)}\n`)
+    log(`업로드 시작: ${run.target.label} ${rows.length}개 (코드 ${run.code()})`)
+    run.write('upload.started', `${dateTime()}\n${Date.now()}\n`)
     let n = 0
-    try {
-      const ftp = new Ftp(run.target, pinned.auth, (s) => run.log(s))
-      await recheck(run, ftp, h)
-      // 파일을 실제로 올린 계정이 이 run 의 계정이다: 정리·되돌리기가 다른 계정(다른 루트)의 run 과 섞지 않게.
-      // 업로드 시작 표시(로그·upload.started)보다 먼저 쓴다: 쓰지 못하면 보내기 전에 멈추고, 원인을 치운 뒤 같은 run 을 다시 올린다.
-      run.write('upload.account', `${pinned.mark}\n`)
-      log(`업로드 시작: ${run.target.label} ${rows.length}개 (코드 ${run.code()})`)
-      run.write('upload.started', `${dateTime()}\n${Date.now()}\n`)
-      for (const [i, r] of rows.entries()) {
-        if (!(await ftp.put(staged[i], r.remote))) stop(run, h, `업로드 실패: ${r.remote} (지금까지 ${n}개 → 되돌리기)`)
-        if ((await ftp.shaOf(r.remote)) !== r.lsha) stop(run, h, `올린 뒤 대조 실패: ${r.remote} (지금까지 ${n}개 → 되돌리기)`)
-        n++
-        log(`[${n}/${rows.length}] ${r.remote}`)
-        h.progress?.(n, rows.length)
-      }
-    } finally {
-      pinned.release()
+    for (const [i, r] of rows.entries()) {
+      if (!(await ftp.put(staged[i], r.remote))) stop(run, h, `업로드 실패: ${r.remote} (지금까지 ${n}개 → 되돌리기)`)
+      if ((await ftp.shaOf(r.remote)) !== r.lsha) stop(run, h, `올린 뒤 대조 실패: ${r.remote} (지금까지 ${n}개 → 되돌리기)`)
+      n++
+      log(`[${n}/${rows.length}] ${r.remote}`)
+      h.progress?.(n, rows.length)
     }
     run.write('upload.done', dateTime() + '\n')
     rmSync(run.path('stage'), { recursive: true, force: true })
