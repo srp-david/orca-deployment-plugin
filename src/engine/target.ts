@@ -38,7 +38,7 @@ export type Target = {
   /** run 기록 폴더. */
   runs: string
   connection: Connection
-  /** 옮기는 동안만: 자격 증명 관리자에 없으면 이 netrc 로 접속한다. 내용은 업로드할 때 계정 지문용으로 대상 호스트의 login 만 읽는다(account.ts). */
+  /** 옮기는 동안만: 자격 증명 관리자에 없으면 이 netrc 로 접속한다. 엔진이 읽어 대상 호스트의 login·password 를 정한다(netrc.ts). */
   legacyNetrc?: string
   mappings: Mapping[]
   java?: JavaBuild
