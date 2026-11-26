@@ -55,7 +55,11 @@ const hasTag = (p: string, tag: string) => ftpText(p)?.includes(tag) ?? false
 /** CLI 출력(stdout·stderr)을 모두 모아 둔다: netrc 비밀번호가 출력에 나오지 않는지 마지막에 본다. */
 const cliOutputs: string[] = []
 function cli(...args: string[]): { code: number; out: string } {
-  const r = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, env, encoding: 'utf8' })
+  return cliEnv({}, ...args)
+}
+/** 환경 변수를 더해 CLI 를 부른다. */
+function cliEnv(extra: Record<string, string>, ...args: string[]): { code: number; out: string } {
+  const r = spawnSync(process.execPath, [CLI, ...args], { cwd: repo, env: { ...env, ...extra }, encoding: 'utf8' })
   const out = (r.stdout ?? '') + (r.stderr ?? '')
   cliOutputs.push(out)
   return { code: r.status ?? -1, out }
@@ -76,7 +80,7 @@ const faFile = (who: Account, p: string) => join(faHome(who), 'site', p)
 const faText = (who: Account, p: string) => (existsSync(faFile(who, p)) ? readFileSync(faFile(who, p), 'utf8') : null)
 const faNetrc = `${tmp}/netrc-fa`
 /** 시험 계정의 비밀번호. 다른 곳에 나오지 않는 글자라, run 기록·로그·출력에 새어 나오지 않는지 찾을 수 있다. */
-const faPassword = (who: Account) => `pw-${who}-7c1e93d05b`
+const faPassword = (who: Account) => `pw:${who}-7c1e93d05b`
 /** netrc 에 그 계정 항목 한 줄(공백이 든 이름은 따옴표로). */
 const faEntry = (who: Account) =>
   `machine 127.0.0.1 login ${/\s/.test(faUser(who)) ? `"${faUser(who)}"` : faUser(who)} password ${faPassword(who)}\n`
@@ -875,39 +879,108 @@ async function accountScenarios(): Promise<void> {
     return gitc('rev-parse', 'HEAD')
   }
 
-  await step('다른 호스트 항목의 login 값이 macdef 여도 대상 항목의 계정으로 보내고, 지문은 보낸 사용자 이름 (재검토 1)', () => {
-    sideTarget('fb', '/site-b', ['x', 'y'])
-    const q = commitF('fb new\n')
-    const shape = (entry: string) => `machine elsewhere login macdef password p\n# FTP accounts\n${entry}`
+  /**
+   * 대상 id(운영 루트 root)에서 계정 a 로 run A, 계정 b 로 run B 를 같은 커밋으로 올린다. 각자의 홈에 올라가고, 시험 FTP 가 그
+   * 계정으로만 로그인을 받고, 지문이 그 사용자 이름의 지문인지 본다. 그다음 둘 다 100일 넘게 전으로 옮겨(B 가 나중) 공개 정리
+   * 목록에 A 가 없고 둘 다 마지막 run 으로 남는지 본다.
+   */
+  function twoAccounts(id: string, root: string, [a, b]: [Account, Account], shape?: (entry: string) => string): void {
+    sideTarget(id, root, [a, b])
+    const want = `${id} new\n`
+    const q = commitF(want)
     const ids: Partial<Record<Account, string>> = {}
-    for (const who of ['x', 'y'] as const) {
-      const other = who === 'x' ? 'y' : 'x'
+    for (const who of [a, b]) {
+      const other = who === a ? b : a
       useAccount(who, shape)
-      const p = cli('plan', '--target', 'fb', q)
+      const p = cli('plan', '--target', id, q)
       assert.equal(p.code, 0, p.out)
       const r = runOf(p.out)
       assert.equal(cli('backup', r).code, 0)
       const seen = { [who]: logins(who), [other]: logins(other) }
       const u = cli('upload', r, '--plan', codeOf(p.out), '--yes')
       assert.equal(u.code, 0, u.out)
-      assert.equal(readFileSync(join(faHome(who), 'site-b', 'f.txt'), 'utf8'), 'fb new\n', '그 계정의 홈에 올라감')
-      assert.ok(logins(who) > seen[who], `시험 FTP 가 fa-${who} 로 로그인을 받음`)
+      assert.equal(readFileSync(join(faHome(who), root, 'f.txt'), 'utf8'), want, '그 계정의 홈에 올라감')
+      assert.ok(logins(who) > seen[who], `시험 FTP 가 ${JSON.stringify(faUser(who))} 로 로그인을 받음`)
       assert.equal(logins(other), seen[other], '다른 계정으로는 로그인하지 않음')
-      assert.equal(markIn('fb', r), markFor(who), '지문 = 시험 FTP 가 받은 사용자 이름의 지문')
+      assert.equal(markIn(id, r), markFor(who), `지문 = 시험 FTP 가 받은 사용자 이름(${JSON.stringify(faUser(who))})의 지문`)
       ids[who] = r
     }
     const ago = (days: number) => `x\n${Date.now() - days * 24 * 60 * 60 * 1000}\n`
-    writeFileSync(`${tmp}/runs-fb/${ids.x}/upload.started`, ago(101))
-    writeFileSync(`${tmp}/runs-fb/${ids.y}/upload.started`, ago(100))
-    const pr = cli('prune', '--target', 'fb', '--json')
+    writeFileSync(`${tmp}/runs-${id}/${ids[a]}/upload.started`, ago(101))
+    writeFileSync(`${tmp}/runs-${id}/${ids[b]}/upload.started`, ago(100))
+    const pr = cli('prune', '--target', id, '--json')
     assert.equal(pr.code, 0, pr.out)
     const plan = JSON.parse(pr.out) as { items: { id: string }[]; keptLatest: string[] }
-    assert.ok(!plan.items.some((x) => x.id === ids.x), `A(${ids.x}) 가 지울 목록에 있음`)
-    assert.deepEqual([...plan.keptLatest].sort(), [ids.x, ids.y].sort())
+    assert.ok(!plan.items.some((x) => x.id === ids[a]), `A(${ids[a]}) 가 지울 목록에 있음`)
+    assert.deepEqual([...plan.keptLatest].sort(), [ids[a], ids[b]].sort())
+  }
+
+  await step('다른 호스트 항목의 login 값이 macdef 여도 대상 항목의 계정으로 보내고, 지문은 보낸 사용자 이름 (재검토 1)', () =>
+    twoAccounts('fb', '/site-b', ['x', 'y'], (entry) => `machine elsewhere login macdef password p\n# FTP accounts\n${entry}`)
+  )
+
+  await step('끝 공백만 다른 두 계정(team, "team ")은 다른 지문이고, 정리 목록에 A 가 없음 (재검토 3-1)', () =>
+    twoAccounts('fd', '/site-d', ['t', 'u'])
+  )
+
+  await step('netrc login 에 콜론이 있으면 plan·업로드가 멈추고 upload.account·upload.started 를 남기지 않음 (재검토 3-2)', () => {
+    sideTarget('fe', '/site-e', ['x'])
+    const seeded = readFileSync(join(faHome('x'), 'site-e', 'f.txt'), 'utf8')
+    const q = commitF('fe new\n')
+    useAccount('x')
+    const p = cli('plan', '--target', 'fe', q)
+    assert.equal(p.code, 0, p.out)
+    const r = runOf(p.out)
+    const c = codeOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    const dir = `${tmp}/runs-fe/${r}`
+    const colon = (entry: string) => entry.replace('login fa-x ', 'login fa-x:extra ')
+    useAccount('x', colon)
+    const blocked = cli('plan', '--target', 'fe', q)
+    assert.equal(blocked.code, 1, blocked.out)
+    assert.match(blocked.out, /사용자 이름에 콜론이 있음/)
+    const u = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(u.code, 1, u.out)
+    assert.match(u.out, /사용자 이름에 콜론이 있음/)
+    assert.doesNotMatch(u.out, /fa-x:extra/, '이름 값은 문구에 없음')
+    assert.equal(existsSync(`${dir}/upload.account`), false)
+    assert.equal(existsSync(`${dir}/upload.started`), false)
+    assert.equal(readFileSync(join(faHome('x'), 'site-e', 'f.txt'), 'utf8'), seeded, '아무것도 보내지 않음')
+    // 비밀번호의 콜론은 괜찮다(시험 계정 비밀번호에는 모두 콜론이 있다): 고친 netrc 로 같은 run 을 올린다
+    assert.ok(faPassword('x').includes(':'))
+    useAccount('x')
+    const ok = cli('upload', r, '--plan', c, '--yes')
+    assert.equal(ok.code, 0, ok.out)
+    assert.equal(markIn('fe', r), markFor('x'))
+  })
+
+  const wrongPassword = 'wrong:pw-3b8e17c4a9'
+  await step('사용자 curl 설정(.curlrc)이 verbose 여도 실패한 업로드의 run 기록·CLI 출력에 비밀번호가 없음 (재검토 3-3)', () => {
+    // 이 시험의 CLI 만 임시 CURL_HOME 을 쓴다(실제 사용자 홈의 .curlrc 는 만들거나 고치지 않음).
+    const curlHome = `${tmp}/curl-home`
+    write(`${curlHome}/.curlrc`, 'verbose\n')
+    sideTarget('fg', '/site-g', ['x'])
+    const q = commitF('fg new\n')
+    useAccount('x')
+    const p = cli('plan', '--target', 'fg', q)
+    assert.equal(p.code, 0, p.out)
+    const r = runOf(p.out)
+    assert.equal(cli('backup', r).code, 0)
+    // 비밀번호만 틀리게: 로그인이 실패한다
+    useAccount('x', (entry) => entry.replace(faPassword('x'), wrongPassword))
+    const u = cliEnv({ CURL_HOME: curlHome }, 'upload', r, '--plan', codeOf(p.out), '--yes')
+    useAccount('x')
+    assert.equal(u.code, 1, u.out)
+    const dir = `${tmp}/runs-fg/${r}`
+    assert.match(readFileSync(`${dir}/deploy.log`, 'utf8'), /curl/, 'curl 오류는 run 로그에 남음')
+    assert.ok(!u.out.includes(wrongPassword), 'CLI 출력에 비밀번호')
+    const files = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(d, e.name)) : [join(d, e.name)]))
+    for (const f of files(dir)) assert.ok(!readFileSync(f).includes(wrongPassword), `${f} 에 비밀번호`)
   })
 
   await step('이상한 모양의 netrc 는 업로드를 멈추고(줄 번호와 이유만), 지문·업로드 시작 표시를 남기지 않음 (재검토 2·3)', () => {
     sideTarget('fc', '/site-c', ['x'])
+    const seeded = readFileSync(join(faHome('x'), 'site-c', 'f.txt'), 'utf8')
     const q = commitF('fc new\n')
     useAccount('x')
     const p = cli('plan', '--target', 'fc', q)
@@ -932,7 +1005,7 @@ async function accountScenarios(): Promise<void> {
       assert.equal(existsSync(`${dir}/upload.started`), false, `${name}: upload.started 없음`)
       for (const who of ['x', 'y'] as const) assert.ok(!u.out.includes(faPassword(who)), `${name}: 멈춤 문구에 비밀번호 없음`)
     }
-    assert.equal(readFileSync(join(faHome('x'), 'site-c', 'f.txt'), 'utf8'), 'fb new\n', '아무것도 보내지 않음')
+    assert.equal(readFileSync(join(faHome('x'), 'site-c', 'f.txt'), 'utf8'), seeded, '아무것도 보내지 않음')
     // netrc 를 고치면 같은 run 을 올린다
     useAccount('x')
     const ok = cli('upload', r, '--plan', c, '--yes')
@@ -946,8 +1019,7 @@ async function accountScenarios(): Promise<void> {
     const places = [HOME, ...readdirSync(tmp).filter((n) => n.startsWith('runs')).map((n) => join(tmp, n))]
     const scanned = places.flatMap(files)
     assert.ok(scanned.some((f) => f.endsWith('deploy.log')), '살펴본 곳에 deploy.log 가 있어야 함')
-    for (const who of ['x', 'y'] as const) {
-      const secret = faPassword(who)
+    for (const secret of [...(Object.keys(ACCOUNT_NAMES) as Account[]).map(faPassword), wrongPassword]) {
       for (const f of scanned) assert.ok(!readFileSync(f).includes(secret), `${f} 에 비밀번호`)
       assert.ok(!cliOutputs.some((o) => o.includes(secret)), 'CLI 출력에 비밀번호')
     }

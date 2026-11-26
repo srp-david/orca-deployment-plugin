@@ -1,7 +1,7 @@
 // 리뷰(2026-11-06 Codex 1·2차)에서 나온 안전 문제의 회귀 시험. FTP 없이 run 기록·잠금·설정만으로 본다.
 // 사용법: node --test test/safety.spec.ts
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -271,8 +271,10 @@ test('계정 지문: 호스트·포트·사용자 이름으로 만들고, 비밀
   assert.equal(accountMark(t, { kind: 'user', user: 'alice', password: 'other' }), m, '비밀번호는 지문에 들지 않음')
   assert.notEqual(accountMark(t, { kind: 'user', user: 'bob', password: 'secret' }), m)
   assert.notEqual(accountMark({ ...t, connection: { ...t.connection, port: 21 } }, { kind: 'user', user: 'alice', password: 'secret' }), m)
-  // 앞뒤 공백은 빼고, 대소문자는 그대로
-  assert.equal(accountMark(t, { kind: 'user', user: ' alice ', password: 'x' }), m)
+  // curl 이 보내는 사용자 이름을 글자 그대로 쓴다: 앞뒤 공백도 빼지 않고(재검토 3-1), 대소문자도 그대로
+  assert.notEqual(accountMark(t, { kind: 'user', user: ' alice ', password: 'x' }), m)
+  assert.notEqual(accountMark(t, { kind: 'user', user: 'team', password: 'x' }), accountMark(t, { kind: 'user', user: 'team ', password: 'x' }))
+  assert.equal(accountMark(t, { kind: 'user', user: 'team ', password: 'x' }), want('team '))
   assert.notEqual(accountMark(t, { kind: 'user', user: 'Alice', password: 'x' }), m)
 })
 
@@ -332,6 +334,16 @@ test('netrc 읽기: 이상한 모양은 고르지 않고 멈춘다(줄 번호와
   stops(`machine ftp.example.com password ${secret}\n`, /login 이 없음/)
   stops(`machine ftp.example.com login alice\n`, /password 가 없음/)
   stops(Buffer.from([...Buffer.from('machine ftp.example.com login al'), 0x81, ...Buffer.from(` password ${secret}\n`)]), /UTF-8/)
+  // 재검토 3-4: 따옴표 값 안의 실제 탭, C1 제어 문자(U+0080–U+009F, 주석·값 어디든), 빈 호스트
+  stops(`machine ftp.example.com login "al\tice" password ${secret}\n`, /1행.*탭/)
+  stops(`machine ftp.example.com login alice password "${secret}\tq"\n`, /1행.*탭/)
+  stops(`# 메모\u0085\n${ok}`, /1행.*제어 문자/)
+  stops(`machine ftp.example.com login alice password ${secret}\u009f\n`, /1행.*제어 문자/)
+  stops(`machine "" login bob password q\ndefault login alice password ${secret}\n`, /1행.*호스트가 비었음/)
+  // 구분자로 쓴 탭은 그대로 된다
+  assert.deepEqual(parseNetrc(`machine\tftp.example.com\tlogin\talice\tpassword\t${secret}\n`, 'ftp.example.com', 'test.netrc'), { user: 'alice', password: secret })
+  // 비UTF-8 은 그 줄 번호를 준다
+  stops(Buffer.from([...Buffer.from(`# 첫 줄\nmachine ftp.example.com login al`), 0x81, ...Buffer.from(` password ${secret}\n`)]), /2행.*UTF-8/)
 })
 
 test('계정 지문은 보낸 사용자 이름으로만 만든다: 이름이 무엇이든 다른 이름과 겹치지 않고, 비밀번호만 바뀌면 같다 (재검토 3)', async () => {
@@ -345,6 +357,54 @@ test('계정 지문은 보낸 사용자 이름으로만 만든다: 이름이 무
   assert.notEqual(oddMark, markOf('machine ftp.example.com login alice password p\n'))
   assert.notEqual(oddMark, markOf('machine ftp.example.com login bob password p\n'))
   assert.equal(markOf('machine ftp.example.com login alice password one\n'), markOf('# 바꿈\nmachine ftp.example.com login "alice" password "two words"\n'))
+})
+
+/**
+ * 자식 Node 에서 resolveAuth 를 부른다. 자격 증명 관리자(PowerShell) 호출만 가짜로 바꿔, 실제 자격 증명 관리자를 쓰지 않고
+ * PD_FAKE_CRED(user, password) 를 저장된 값처럼 돌려준다. 결과는 'ok <같으면 same>' 또는 'stop <문구>' 한 줄.
+ */
+function resolveWithCred(user: string, password: string): string {
+  const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64')
+  const fake = `data:text/javascript,${encodeURIComponent(
+    [
+      "import cp from 'node:child_process'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      'const real = cp.spawn',
+      'cp.spawn = (cmd, args, opts) => /powershell\\.exe$/i.test(String(cmd))',
+      "  ? real(process.execPath, ['-e', \"process.stdin.resume();process.stdin.on('end',()=>console.log(process.env.PD_FAKE_CRED))\"], opts)",
+      '  : real(cmd, args, opts)',
+      'syncBuiltinESMExports()'
+    ].join('\n')
+  )}`
+  const ftp = new URL('../src/engine/ftp.ts', import.meta.url).href
+  const script = [
+    `const { resolveAuth } = await import(${JSON.stringify(ftp)})`,
+    "const t = { id: 'cred-fake', connection: { protocol: 'ftp', host: 'ftp.example.com', port: 21, root: '/' } }",
+    'try {',
+    '  const a = await resolveAuth(t)',
+    "  console.log('ok ' + (a.user === process.env.PD_WANT_USER && a.password === process.env.PD_WANT_PASSWORD ? 'same' : 'different'))",
+    "} catch (e) { console.log('stop ' + e.message) }"
+  ].join('\n')
+  const r = spawnSync(process.execPath, ['--import', fake, '--input-type=module', '-e', script], {
+    env: { ...process.env, PD_FAKE_CRED: `ok ${b64(user)} ${b64(password)}`, PD_WANT_USER: user, PD_WANT_PASSWORD: password },
+    encoding: 'utf8'
+  })
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`.trim()
+}
+
+test('접속 정보: 사용자 이름에 콜론이 있으면 자격 증명 관리자·netrc 어느 쪽이든 멈춘다(값은 문구에 없음). 비밀번호의 콜론은 된다 (재검토 3-2)', async () => {
+  const { parseNetrc } = await import('../src/engine/netrc.ts')
+  // 자격 증명 관리자에서 읽은 값
+  const stopped = resolveWithCred('al:ice', 'zz-secret-7')
+  assert.match(stopped, /^stop .*사용자 이름에 콜론이 있음/)
+  assert.ok(!stopped.includes('al:ice') && !stopped.includes('zz-secret-7'), stopped)
+  assert.equal(resolveWithCred('alice', 'p:w:zz-secret-7'), 'ok same')
+  // netrc 에서 읽은 값
+  assert.throws(
+    () => parseNetrc('machine ftp.example.com login al:ice password zz-secret-7\n', 'ftp.example.com', 'test.netrc'),
+    (e: Error) => /1행.*사용자 이름에 콜론이 있음/.test(e.message) && !e.message.includes('al:ice') && !e.message.includes('zz-secret-7')
+  )
+  assert.deepEqual(parseNetrc('machine ftp.example.com login alice password p:w\n', 'ftp.example.com', 'test.netrc'), { user: 'alice', password: 'p:w' })
 })
 
 test('작업 기록: 프로세스 번호가 다른 프로세스에 다시 쓰여도, beat 가 멈췄으면 끝난 작업으로 본다', async () => {
