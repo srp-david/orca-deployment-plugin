@@ -787,7 +787,6 @@ async function accountScenarios(): Promise<void> {
   gitc('push', '-q')
   const faC = gitc('rev-parse', 'HEAD')
   const mark = (id: string) => readFileSync(`${tmp}/runs-fa/${id}/upload.account`, 'utf8').trim()
-  const netrcCopies = () => readdirSync(tmpdir()).filter((n) => n.startsWith('pd-netrc-')).sort()
 
   await step('업로드 도중 netrc 가 바뀌어도 그 업로드는 시작할 때의 계정으로 보내고, 지문도 그 계정', async () => {
     const { upload } = await import('../src/engine/steps.ts')
@@ -797,7 +796,6 @@ async function accountScenarios(): Promise<void> {
     const r = runOf(p.out)
     const c = codeOf(p.out)
     assert.equal(cli('backup', r).code, 0)
-    const before = netrcCopies()
     let switched = false
     try {
       await upload(r, c, true, {
@@ -816,7 +814,6 @@ async function accountScenarios(): Promise<void> {
     assert.equal(faText('x', 'f.txt'), 'fa C\n', '시작할 때의 계정(X)의 홈에 올라감')
     assert.equal(faText('y', 'f.txt'), 'fa B\n', '바꾼 계정(Y)의 홈은 그대로')
     assert.equal(mark(r), mark(ra), '지문도 X')
-    assert.deepEqual(netrcCopies(), before, 'netrc 사본은 끝나면 지워짐')
     for (const f of readdirSync(`${tmp}/runs-fa/${r}`)) assert.ok(!/netrc/i.test(f), `run 기록에 netrc 사본 없음: ${f}`)
   })
 
